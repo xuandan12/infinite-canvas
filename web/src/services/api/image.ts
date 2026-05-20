@@ -7,7 +7,7 @@ import { imageToDataUrl } from "@/services/image-storage";
 import type { ReferenceImage } from "@/types/image";
 
 export type ChatCompletionMessage = {
-  role: "user" | "assistant";
+  role: "system" | "user" | "assistant";
   content: string | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
 };
 
@@ -58,6 +58,16 @@ function parseStreamChunk(chunk: string, onDelta: (value: string) => void) {
   if (deltaText) onDelta(deltaText);
 }
 
+function withSystemPrompt(config: AiConfig, prompt: string) {
+  const systemPrompt = config.systemPrompt.trim();
+  return systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
+}
+
+function withSystemMessage(config: AiConfig, messages: ChatCompletionMessage[]) {
+  const systemPrompt = config.systemPrompt.trim();
+  return systemPrompt ? [{ role: "system" as const, content: systemPrompt }, ...messages] : messages;
+}
+
 export async function requestGeneration(config: AiConfig, prompt: string) {
   const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
   try {
@@ -65,7 +75,7 @@ export async function requestGeneration(config: AiConfig, prompt: string) {
       buildApiUrl(config.baseUrl, "/images/generations"),
       {
         model: config.model,
-        prompt,
+        prompt: withSystemPrompt(config, prompt),
         n,
         quality: config.quality || undefined,
         size: config.size || undefined,
@@ -88,7 +98,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
   const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
   const formData = new FormData();
   formData.set("model", config.model);
-  formData.set("prompt", prompt);
+  formData.set("prompt", withSystemPrompt(config, prompt));
   formData.set("n", String(n));
   formData.set("response_format", "b64_json");
   if (config.quality) {
@@ -122,7 +132,7 @@ export async function requestImageQuestion(config: AiConfig, messages: ChatCompl
       buildApiUrl(config.baseUrl, "/chat/completions"),
       {
       model: config.model,
-      messages,
+      messages: withSystemMessage(config, messages),
       stream: true,
       },
       {

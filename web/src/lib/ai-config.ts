@@ -4,6 +4,7 @@ export type AiConfig = {
   model: string;
   imageModel: string;
   textModel: string;
+  systemPrompt: string;
   models: string[];
   quality: string;
   size: string;
@@ -18,6 +19,7 @@ export const defaultConfig: AiConfig = {
   model: "gpt-image-2",
   imageModel: "gpt-image-2",
   textModel: "gpt-5.5",
+  systemPrompt: "",
   models: [],
   quality: "auto",
   size: "1:1",

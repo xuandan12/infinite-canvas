@@ -227,6 +227,9 @@ export function AppTopNav({ activeToolSlug, config, onConfigChange, hideHeader =
             <Form.Item label="默认文本模型" className="mb-0">
               <ModelPicker config={config} value={config.textModel} onChange={(model) => onConfigChange("textModel", model)} fullWidth />
             </Form.Item>
+            <Form.Item label="系统提示词" className="mb-0">
+              <Input.TextArea rows={4} value={config.systemPrompt} placeholder="例如：你是一位擅长电影感写实摄影的视觉导演。" onChange={(event) => onConfigChange("systemPrompt", event.target.value)} />
+            </Form.Item>
           </Form>
         </div>
       </Modal>
