@@ -47,7 +47,7 @@ export function MobileNavDrawer({ open, activeToolSlug, onClose }: MobileNavDraw
                 })}
             </div>
             <div className="mt-8 border-t border-stone-200 pt-5 dark:border-stone-800">
-                <p className="mb-3 px-1 text-xs text-stone-500 dark:text-stone-400">外观、文档与项目链接</p>
+                <p className="mb-3 px-1 text-xs text-stone-500 dark:text-stone-400">外观与项目链接</p>
                 <UserStatusActions />
             </div>
         </Drawer>
