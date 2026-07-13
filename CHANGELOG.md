@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [修复] Sun canvas 首页灵感图谱仅展示可正常加载的封面，并更新品牌 Logo 与版权信息。
++ [调整] 默认首页升级为 Sun canvas 品牌体验，并同步更换 Logo、站点元信息与新建画布入口。
 + [优化] 本地 Agent 连接说明明确区分插件 / 手动 MCP 才会增加 Codex token 消耗，直接运行 Agent 不受影响。
 + [优化] 优化本地 Agent 连接说明，区分 Codex 插件启动和直接运行 Agent 两种方式。
 + [新增] Agent 对话消息改用 streamdown 流式渲染，提升长回复与 Markdown 内容展示效果。
