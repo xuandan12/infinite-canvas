@@ -115,6 +115,7 @@ type ConfigStore = {
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
+    updateChannels: (channels: ModelChannel[], preferredChannelId?: string) => void;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (shouldPromptContinue?: boolean, tab?: ConfigTabKey) => void;
@@ -182,6 +183,7 @@ export const useConfigStore = create<ConfigStore>()(
                         [key]: value,
                     },
                 })),
+            updateChannels: (channels, preferredChannelId) => set((state) => ({ config: withModelChannels(state.config, channels, preferredChannelId) })),
             updateWebdavConfig: (key, value) =>
                 set((state) => ({
                     webdav: {
@@ -237,6 +239,49 @@ export const useConfigStore = create<ConfigStore>()(
         },
     ),
 );
+
+export function withModelChannels(config: AiConfig, channels: ModelChannel[], preferredChannelId?: string): AiConfig {
+    const models = modelOptionsFromChannels(channels);
+    const suggestedImageModels = filterModelsByCapability(models, "image");
+    const suggestedVideoModels = filterModelsByCapability(models, "video");
+    const suggestedTextModels = filterModelsByCapability(models, "text");
+    const suggestedAudioModels = filterModelsByCapability(models, "audio");
+    const imageModels = preferredChannelId ? suggestedImageModels : keepOrSuggestModels(config.imageModels, suggestedImageModels, models);
+    const videoModels = preferredChannelId ? suggestedVideoModels : keepOrSuggestModels(config.videoModels, suggestedVideoModels, models);
+    const textModels = preferredChannelId ? suggestedTextModels : keepOrSuggestModels(config.textModels, suggestedTextModels, models);
+    const audioModels = preferredChannelId ? suggestedAudioModels : keepOrSuggestModels(config.audioModels, suggestedAudioModels, models);
+    const preferredModels = preferredChannelId ? models.filter((model) => decodeChannelModel(model)?.channelId === preferredChannelId) : [];
+    return {
+        ...config,
+        channels,
+        models,
+        baseUrl: channels[0]?.baseUrl || config.baseUrl,
+        apiKey: channels[0]?.apiKey || config.apiKey,
+        apiFormat: channels[0]?.apiFormat || config.apiFormat,
+        imageModels,
+        videoModels,
+        textModels,
+        audioModels,
+        model: normalizeDefaultModel(config.model, models, preferredModels),
+        imageModel: normalizeDefaultModel(config.imageModel, imageModels, preferredModels),
+        videoModel: normalizeDefaultModel(config.videoModel, videoModels, preferredModels),
+        textModel: normalizeDefaultModel(config.textModel, textModels, preferredModels),
+        audioModel: normalizeDefaultModel(config.audioModel, audioModels, preferredModels),
+    };
+}
+
+function keepOrSuggestModels(current: string[], suggested: string[], allModels: string[]) {
+    const available = new Set(allModels);
+    const kept = uniqueModelOptions(current).filter((model) => available.has(model));
+    return kept.length ? kept : suggested;
+}
+
+function normalizeDefaultModel(value: string, options: string[], preferredModels: string[] = []) {
+    const preferredModel = preferredModels.find((model) => options.includes(model));
+    if (preferredModel) return preferredModel;
+    if (options.includes(value)) return value;
+    return options[0] || "";
+}
 
 function normalizeModelList(models: string[], channels: ModelChannel[]) {
     const allModelOptions = channels.flatMap((channel) => channel.models.map((model) => encodeChannelModel(channel.id, model)));
