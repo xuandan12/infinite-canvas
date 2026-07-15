@@ -2,17 +2,64 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 
 import { parseChangelog } from "./src/lib/release";
 
 const webDir = dirname(fileURLToPath(import.meta.url));
 const localVersion = readFileSync(resolve(webDir, "../VERSION"), "utf8").trim() || "dev";
 const localChangelog = readFileSync(resolve(webDir, "../CHANGELOG.md"), "utf8");
+const arkCollectionPath = /^\/api\/ark\/api\/(?:plan\/)?v3\/contents\/generations\/tasks$/;
+const arkTaskPath = /^\/api\/ark\/api\/(?:plan\/)?v3\/contents\/generations\/tasks\/[A-Za-z0-9_-]+$/;
+
+function arkProxyGuard(): Plugin {
+    return {
+        name: "sun-canvas-ark-proxy-guard",
+        configureServer(server) {
+            server.middlewares.use((request, response, next) => {
+                const pathname = new URL(request.url || "/", "http://localhost").pathname;
+                if (!pathname.startsWith("/api/ark")) return next();
+                const method = String(request.method || "GET").toUpperCase();
+                const collection = arkCollectionPath.test(pathname);
+                const task = arkTaskPath.test(pathname);
+                if ((collection && method === "POST") || (task && method === "GET")) return next();
+
+                response.statusCode = collection || task ? 405 : 404;
+                if (collection || task) response.setHeader("Allow", collection ? "POST" : "GET");
+                response.setHeader("Content-Type", "application/json; charset=utf-8");
+                response.setHeader("Cache-Control", "no-store");
+                response.setHeader("X-Sun-Canvas-Ark-Proxy", "1");
+                response.end(JSON.stringify({ error: { message: collection || task ? "Method not allowed" : "Ark proxy route not found" } }));
+            });
+        },
+    };
+}
 
 export default defineConfig({
     base: process.env.VITE_BASE || "/",
-    plugins: [react()],
+    plugins: [arkProxyGuard(), react()],
+    server: {
+        proxy: {
+            "/api/ark": {
+                target: "https://ark.cn-beijing.volces.com",
+                changeOrigin: true,
+                secure: true,
+                rewrite: (path) => path.replace(/^\/api\/ark/, ""),
+                configure(proxy) {
+                    proxy.on("proxyReq", (proxyRequest) => {
+                        proxyRequest.removeHeader("cookie");
+                        proxyRequest.removeHeader("origin");
+                        proxyRequest.removeHeader("referer");
+                    });
+                    proxy.on("proxyRes", (proxyResponse) => {
+                        delete proxyResponse.headers["set-cookie"];
+                        proxyResponse.headers["cache-control"] = "no-store";
+                        proxyResponse.headers["x-sun-canvas-ark-proxy"] = "1";
+                    });
+                },
+            },
+        },
+    },
     resolve: {
         alias: {
             "@": resolve(webDir, "src"),

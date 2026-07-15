@@ -1,7 +1,16 @@
 {
-  "framework": "vite",
-  "installCommand": "bun install",
-  "buildCommand": "bun run build",
-  "outputDirectory": "dist",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+    "framework": "vite",
+    "installCommand": "bun install",
+    "buildCommand": "bun run build",
+    "outputDirectory": "dist",
+    "functions": {
+        "api/ark/**/*.ts": { "maxDuration": 60 }
+    },
+    "rewrites": [
+        {
+            "source": "/api/ark/:path*",
+            "destination": "/api/ark/:path*"
+        },
+        { "source": "/(.*)", "destination": "/index.html" }
+    ]
 }

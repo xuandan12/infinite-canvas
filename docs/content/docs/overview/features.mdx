@@ -57,23 +57,23 @@ description: 当前项目已实现的主要功能
 
 ## AI 生成
 
-项目默认使用前台直连：前端使用浏览器本地配置的 Base URL、API Key 和 Model 直接请求 OpenAI 兼容接口，不再通过项目服务端转发 AI 请求。
+项目默认使用前台直连：前端使用浏览器本地配置的 Base URL、API Key 和 Model 请求 OpenAI 兼容接口。官方火山方舟 Seedance 2.0 因浏览器 CORS 限制，创建与查询任务例外地经站点同源受限代理转发。
 
 OpenAI 兼容图像和文本能力继续复用现有接口：
 
 - `/v1/images/generations`：文生图。
 - `/v1/images/edits`：图生图/参考图编辑。
 - `/v1/responses`：文本问答、带图问答和在线 Agent 工具调用。
-- `/v1/models`：读取模型列表；火山方舟 Agent Plan 专属 `/api/plan/v3` 当前未提供 OpenAI `/models` 模型列表接口，需要手动填写模型名。
+- `/v1/models`：读取 OpenAI 兼容渠道模型列表。
 
 视频能力支持两类接口：
 
 - OpenAI 风格视频：`POST /v1/videos`、`GET /v1/videos/{id}`、`GET /v1/videos/{id}/content`。
-- 火山方舟 Agent Plan / Seedance 2.0：Base URL 使用 `https://ark.cn-beijing.volces.com/api/plan/v3`，创建任务为 `POST /contents/generations/tasks`，查询任务为 `GET /contents/generations/tasks/{id}`，成功结果读取 `content.video_url`。
+- 火山方舟官方 Seedance 2.0：标准渠道使用 `https://ark.cn-beijing.volces.com/api/v3`；Agent Plan 使用 `https://ark.cn-beijing.volces.com/api/plan/v3`。两者都通过 `POST /contents/generations/tasks` 创建任务、`GET /contents/generations/tasks/{id}` 查询任务，并从 `content.video_url` 读取结果；浏览器实际请求站点同源的 `/api/ark` 代理路径。
 
-Base URL 如果已经以 `/v1`、`/api/v3` 或 `/api/plan/v3` 结尾，系统不会再追加 `/v1`。因此 cpa 反代或火山方舟 Agent Plan 可以继续通过现有 Base URL + API Key + Model 方式配置，不需要新增火山生图 Provider。
+Base URL 如果已经以 `/v1`、`/api/v3` 或 `/api/plan/v3` 结尾，系统不会再追加 `/v1`。标准 Ark 和 Agent Plan 是不同渠道：系统会保留用户选择的路径；仅标准 `/api/v3` 请求会把已知旧别名映射到官方 dated 模型 ID，Agent Plan 模型名始终原样发送。
 
-配置弹窗里的“拉取模型列表”会尝试真实请求 OpenAI `/models`，不会为 Agent Plan 伪造模型结果。如果火山方舟 Agent Plan 返回 404，请手动增加 `doubao-seedance-2.0` 或文档列出的其他模型名。
+配置弹窗识别到官方 Ark 地址后，会提供“添加预置模型”入口并保留 Base URL 与已有模型：标准 `/api/v3` 加入 `doubao-seedance-2-0-260128` 与 `doubao-seedance-2-0-fast-260128`；Agent Plan 加入 `doubao-seedance-2.0`、`doubao-seedance-2.0-fast` 与 `doubao-seedance-2.0-mini` 候选别名。火山方舟没有公开提供使用当前 Bearer API Key 查询“该 Key 已开通模型”的推理接口，因此这些预置不代表套餐权限，最终以实际创建任务的返回结果为准。第三方兼容渠道仍按其真实 `/models` 返回结果。
 
 可配置项：
 
@@ -85,10 +85,11 @@ Base URL 如果已经以 `/v1`、`/api/v3` 或 `/api/plan/v3` 结尾，系统不
 - 生成数量。
 - 视频模型。
 - 视频比例、清晰度、时长、生成声音和水印。
+- 画布视频节点、生成配置节点与视频创作台复用同一套参数面板，并按当前所选模型切换通用或 Seedance 专属布局。
 
 普通图片/文本节点可以直接输入提示词生成结果。生成配置节点可以读取上游节点内容，并按节点自己的配置批量生成多个图片或文本结果。生成配置节点支持预览当前提示词和参考图输入，并调整输入顺序。
 
-视频生成可从文本节点读取 prompt，从图片节点读取参考图，从视频节点读取参考视频，从音频节点读取参考音频。Seedance 2.0 支持最多 9 张参考图、3 个参考视频、3 个参考音频；分辨率支持 `480p`、`720p`、`1080p`（fast 模型不支持 `1080p`），比例支持 `16:9`、`4:3`、`1:1`、`3:4`、`9:16`、`21:9`、`adaptive`，时长支持 4-15 秒或智能时长。生成成功后会把视频插入画布为视频节点并使用原生播放器预览。参考视频和参考音频优先使用公网可访问 URL；本地素材会以前端可读取的数据传给兼容接口，是否支持取决于具体上游。
+视频生成可从文本节点读取 prompt，从图片节点读取参考图，从视频节点读取参考视频，从音频节点读取参考音频。Seedance 2.0 支持最多 9 张参考图、3 个参考视频、3 个参考音频；分辨率支持 `480p`、`720p`、`1080p`（Fast / Mini 支持 `480p` 与 `720p`，不支持 `1080p`），比例支持 `16:9`、`4:3`、`1:1`、`3:4`、`9:16`、`21:9`、`adaptive`，时长支持 4-15 秒或智能时长。创建任务会把所选清晰度作为顶层 `resolution` 发送；结果页优先展示视频文件的真实像素，其次展示任务响应中的分辨率，无法确认时明确显示未知，不再用 `1280x720` 作为兜底。生成成功后会把视频插入画布为视频节点并使用原生播放器预览。官方 Ark 的参考视频和音频应使用其可访问的公网 URL 或 `asset://` 素材 ID；浏览器本地 `blob:` 地址不能被上游读取。
 
 ## 画布助手
 

@@ -8,16 +8,27 @@ import { saveAs } from "file-saver";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
-import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSizeLabel } from "@/components/video-settings-panel";
+import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSettingsSummary } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
-import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import {
+    boolConfig,
+    isSeedanceVideoConfig,
+    normalizeSeedanceRatio,
+    normalizeSeedanceResolution,
+    seedancePixelDimensions,
+    seedanceReferenceLabel,
+    seedanceVideoReferenceError,
+    seedanceVideoReferenceHint,
+    seedanceVideoSpecForDimensions,
+    SEEDANCE_REFERENCE_LIMITS,
+} from "@/lib/seedance-video";
 import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
-import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionLabel, modelOptionName, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -31,6 +42,10 @@ type GeneratedVideo = {
     height: number;
     bytes: number;
     mimeType: string;
+    resolution?: string;
+    ratio?: string;
+    requestedResolution?: string;
+    dimensionsSource?: "metadata" | "task";
 };
 
 type GenerationResult = {
@@ -186,7 +201,19 @@ export default function VideoPage() {
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
             setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
-            await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: performance.now() - batchStartedAt, status: "失败", error: errorMessage }));
+            await saveLog(
+                buildLog({
+                    prompt: snapshot.text,
+                    model,
+                    config: snapshot.config,
+                    references: snapshot.references,
+                    videoReferences: snapshot.videoReferences,
+                    audioReferences: snapshot.audioReferences,
+                    durationMs: performance.now() - batchStartedAt,
+                    status: "失败",
+                    error: errorMessage,
+                }),
+            );
             message.error(errorMessage);
             setRunning(false);
         }
@@ -315,18 +342,37 @@ export default function VideoPage() {
                 const state = await pollVideoGenerationTask(configOverride || taskConfig, log.task);
                 if (state.status === "completed") {
                     const stored = await storeGeneratedVideo(state.result);
+                    const generationElapsedMs = Date.now() - log.createdAt;
+                    const seedance = log.task.provider === "seedance";
+                    const taskModel = modelOptionName(log.task.model || log.model);
+                    const requestedResolution = seedance ? normalizeSeedanceResolution(log.config.vquality, taskModel) : normalizeResolution(log.config.vquality);
+                    const taskResolution = seedance && state.result.resolution ? normalizeSeedanceResolution(state.result.resolution, taskModel) : state.result.resolution;
+                    const taskRatio = seedance && state.result.ratio ? normalizeSeedanceRatio(state.result.ratio) : state.result.ratio;
+                    const storedWidth = stored.width || 0;
+                    const storedHeight = stored.height || 0;
+                    const storedSpec = seedance && storedWidth && storedHeight ? seedanceVideoSpecForDimensions(storedWidth, storedHeight) : null;
+                    const taskDimensions = seedance && taskResolution && taskRatio ? seedancePixelDimensions(taskResolution, taskRatio) : null;
+                    const actualResolution = storedSpec?.resolution || taskResolution;
+                    const actualRatio = storedSpec?.ratio || taskRatio;
                     const nextVideo: GeneratedVideo = {
                         id: nanoid(),
                         url: stored.url,
                         storageKey: stored.storageKey,
-                        durationMs: Date.now() - log.createdAt,
-                        width: stored.width || 1280,
-                        height: stored.height || 720,
+                        durationMs: stored.durationMs || (state.result.durationSeconds ? Math.round(state.result.durationSeconds * 1000) : 0),
+                        width: storedWidth || taskDimensions?.width || 0,
+                        height: storedHeight || taskDimensions?.height || 0,
                         bytes: stored.bytes,
                         mimeType: stored.mimeType,
+                        resolution: actualResolution,
+                        ratio: actualRatio,
+                        requestedResolution,
+                        dimensionsSource: storedWidth && storedHeight ? "metadata" : taskDimensions ? "task" : undefined,
                     };
                     setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
-                    await saveLog({ ...log, status: "成功", durationMs: nextVideo.durationMs, video: nextVideo, error: undefined });
+                    await saveLog({ ...log, status: "成功", durationMs: generationElapsedMs, video: nextVideo, error: undefined });
+                    if (seedance && actualResolution && actualResolution !== requestedResolution) {
+                        message.warning(`已请求 ${requestedResolution}，但 Ark 结果为 ${actualResolution}；已按实际结果记录`);
+                    }
                     message.success("视频已生成");
                     return;
                 }
@@ -368,7 +414,15 @@ export default function VideoPage() {
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
-                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
+                    <LogPanel
+                        logs={logs}
+                        selectedLogIds={selectedLogIds}
+                        activeLogId={previewLog?.id}
+                        onSelectedLogIdsChange={setSelectedLogIds}
+                        onCreateSession={createSession}
+                        onDeleteSelected={() => setDeleteConfirmOpen(true)}
+                        onPreviewLog={previewGenerationLog}
+                    />
                 </aside>
 
                 <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
@@ -419,7 +473,12 @@ export default function VideoPage() {
                                             <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
                                             <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("image", index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
-                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考图">
+                                            <button
+                                                type="button"
+                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                aria-label="移除参考图"
+                                            >
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
@@ -441,7 +500,12 @@ export default function VideoPage() {
                                             <video src={item.url} className="size-full object-cover" muted preload="metadata" />
                                             <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("video", index)}</span>
                                             <ReferenceOrderButtons index={index} total={videoReferences.length} onMove={(offset) => setVideoReferences((value) => moveListItem(value, index, offset))} />
-                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考视频">
+                                            <button
+                                                type="button"
+                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                aria-label="移除参考视频"
+                                            >
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
@@ -467,7 +531,12 @@ export default function VideoPage() {
                                             </div>
                                             <audio src={item.url} controls className="h-8 w-full" preload="metadata" />
                                             <ReferenceOrderButtons index={index} total={audioReferences.length} onMove={(offset) => setAudioReferences((value) => moveListItem(value, index, offset))} />
-                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考音频">
+                                            <button
+                                                type="button"
+                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                aria-label="移除参考音频"
+                                            >
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
@@ -478,7 +547,7 @@ export default function VideoPage() {
 
                             <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
                                 <span className="truncate text-stone-500 dark:text-stone-400">
-                                    {modelOptionLabel(effectiveConfig, model)} · {normalizeResolution(effectiveConfig.vquality)}p · {videoSizeLabel(effectiveConfig.size)} · {normalizeVideoSeconds(effectiveConfig.videoSeconds)}s
+                                    {modelOptionLabel(effectiveConfig, model)} · {videoSettingsSummary({ ...effectiveConfig, model, videoModel: model })}
                                 </span>
                                 <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
                                     调整
@@ -504,7 +573,15 @@ export default function VideoPage() {
                         </div>
                         {results.length ? (
                             <div className="grid gap-4">
-                                {results.map((result) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} /> : result.status === "failed" ? <FailedVideoCard key={result.id} error={result.error || "生成失败"} onRetry={retryResult} /> : <PendingVideoCard key={result.id} />))}
+                                {results.map((result) =>
+                                    result.status === "success" && result.video ? (
+                                        <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} />
+                                    ) : result.status === "failed" ? (
+                                        <FailedVideoCard key={result.id} error={result.error || "生成失败"} onRetry={retryResult} />
+                                    ) : (
+                                        <PendingVideoCard key={result.id} />
+                                    ),
+                                )}
                             </div>
                         ) : (
                             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
@@ -527,7 +604,15 @@ export default function VideoPage() {
                 }}
             />
             <Drawer title="生成记录" placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
-                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
+                <LogPanel
+                    logs={logs}
+                    selectedLogIds={selectedLogIds}
+                    activeLogId={previewLog?.id}
+                    onSelectedLogIdsChange={setSelectedLogIds}
+                    onCreateSession={createSession}
+                    onDeleteSelected={() => setDeleteConfirmOpen(true)}
+                    onPreviewLog={previewGenerationLog}
+                />
             </Drawer>
             <Drawer title="参数" placement="bottom" height="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
@@ -553,7 +638,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <VideoSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
+                <VideoSettingsPanel config={{ ...config, model, videoModel: model }} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
             </div>
         </>
     );
@@ -565,11 +650,9 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
             <video src={video.url} controls className="aspect-video w-full bg-black object-contain" />
             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
                 <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
-                    <span>
-                        {video.width}x{video.height}
-                    </span>
-                    <span>{formatBytes(video.bytes)}</span>
-                    <span>{formatDuration(video.durationMs)}</span>
+                    <span>{videoResolutionSummary(video)}</span>
+                    {video.bytes > 0 ? <span>{formatBytes(video.bytes)}</span> : null}
+                    {video.durationMs > 0 && video.dimensionsSource ? <span>视频 {formatDuration(video.durationMs)}</span> : null}
                 </div>
                 <div className="flex shrink-0 gap-1">
                     <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => onSaveAsset(video)}>
@@ -582,6 +665,19 @@ function ResultVideoCard({ video, onDownload, onSaveAsset }: { video: GeneratedV
             </div>
         </div>
     );
+}
+
+function videoResolutionSummary(video: GeneratedVideo) {
+    const dimensions = video.width > 0 && video.height > 0 ? `${video.width}x${video.height}` : "";
+    if (video.dimensionsSource === "metadata") return `实际 ${dimensions}${video.resolution ? ` · ${video.resolution}` : ""}`;
+    if (video.dimensionsSource === "task") return `任务返回 ${video.resolution || "分辨率"}${dimensions ? ` · ${dimensions}` : ""}`;
+    if (dimensions) return `${dimensions}（旧记录未校验）`;
+    if (video.resolution) return `任务返回 ${video.resolution}`;
+    return video.requestedResolution ? `实际分辨率未知 · 请求 ${resolutionLabel(video.requestedResolution)}` : "实际分辨率未知";
+}
+
+function resolutionLabel(value: string) {
+    return /^\d+$/.test(value) ? `${value}p` : value;
 }
 
 function PendingVideoCard() {
@@ -652,7 +748,14 @@ function LogPanel({
             </div>
             <div className="space-y-3">
                 {logs.map((log) => (
-                    <LogCard key={log.id} log={log} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onClick={() => onPreviewLog(log)} />
+                    <LogCard
+                        key={log.id}
+                        log={log}
+                        selected={selectedLogIds.includes(log.id)}
+                        active={activeLogId === log.id}
+                        onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
+                        onClick={() => onPreviewLog(log)}
+                    />
                 ))}
                 {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
             </div>
@@ -662,7 +765,11 @@ function LogPanel({
 
 function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
     return (
-        <button type="button" className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`} onClick={onClick}>
+        <button
+            type="button"
+            className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`}
+            onClick={onClick}
+        >
             <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
                 <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
                 <div className="min-w-0">
@@ -806,7 +913,31 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
     };
 }
 
-function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {
+function buildLog({
+    prompt,
+    model,
+    config,
+    references,
+    videoReferences,
+    audioReferences,
+    durationMs,
+    status,
+    task,
+    video,
+    error,
+}: {
+    prompt: string;
+    model: string;
+    config: AiConfig;
+    references: ReferenceImage[];
+    videoReferences: ReferenceVideo[];
+    audioReferences: ReferenceAudio[];
+    durationMs: number;
+    status: GenerationLog["status"];
+    task?: VideoGenerationTask;
+    video?: GeneratedVideo;
+    error?: string;
+}): GenerationLog {
     const logConfig = {
         model: config.model,
         videoModel: config.videoModel,
@@ -846,7 +977,7 @@ function buildVideoConfig(config: AiConfig, model: string): AiConfig {
         videoModel: model,
         size: seedance ? normalizeSeedanceRatio(config.size) : normalizeVideoSize(config.size),
         videoSeconds: normalizeVideoSeconds(config.videoSeconds),
-        vquality: normalizeResolution(config.vquality),
+        vquality: seedance ? normalizeSeedanceResolution(config.vquality, modelOptionName(model)) : normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
     };

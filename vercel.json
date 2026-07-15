@@ -3,5 +3,14 @@
   "installCommand": "cd web && bun install",
   "buildCommand": "cd web && bun run build",
   "outputDirectory": "web/dist",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "functions": {
+    "api/ark/**/*.ts": { "maxDuration": 60 }
+  },
+  "rewrites": [
+    {
+      "source": "/api/ark/:path*",
+      "destination": "/api/ark/:path*"
+    },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
 }

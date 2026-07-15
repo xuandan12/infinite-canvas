@@ -66,12 +66,29 @@ export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()
 }
 
 function readVideoMeta(url: string) {
-    return new Promise<{ width: number; height: number; durationMs?: number }>((resolve) => {
+    return new Promise<{ width?: number; height?: number; durationMs?: number }>((resolve) => {
         const video = document.createElement("video");
-        const done = () => resolve({ width: video.videoWidth || 1280, height: video.videoHeight || 720, durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : undefined });
-        video.onloadedmetadata = done;
-        video.onerror = done;
+        let settled = false;
+        let timeout = 0;
+        const finish = (meta: { width?: number; height?: number; durationMs?: number }) => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(timeout);
+            video.onloadedmetadata = null;
+            video.onerror = null;
+            resolve(meta);
+        };
+        timeout = window.setTimeout(() => finish({}), 10000);
+        video.preload = "metadata";
+        video.onloadedmetadata = () =>
+            finish({
+                width: video.videoWidth || undefined,
+                height: video.videoHeight || undefined,
+                durationMs: Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : undefined,
+            });
+        video.onerror = () => finish({});
         video.src = url;
+        video.load();
     });
 }
 

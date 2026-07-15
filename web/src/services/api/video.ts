@@ -1,9 +1,21 @@
-import axios from "axios";
+import axios, { type AxiosResponse } from "axios";
 
 import { dataUrlToFile } from "@/lib/image-utils";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
-import { boolConfig, buildSeedancePromptText, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceVideoReferenceError, SEEDANCE_REFERENCE_LIMITS } from "@/lib/seedance-video";
+import {
+    boolConfig,
+    buildSeedancePromptText,
+    isOfficialArkBaseUrl,
+    isSeedanceVideoConfig,
+    normalizeOfficialSeedanceModel,
+    normalizeSeedanceDuration,
+    normalizeSeedanceRatio,
+    normalizeSeedanceResolution,
+    officialArkVideoBaseUrl,
+    seedanceVideoReferenceError,
+    SEEDANCE_REFERENCE_LIMITS,
+} from "@/lib/seedance-video";
 import { buildApiUrl, modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -18,11 +30,14 @@ type SeedanceTask = {
     url?: string;
     result_url?: string;
     video_url?: string;
+    resolution?: string;
+    ratio?: string;
+    duration?: number | string;
 };
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
 type RequestOptions = { signal?: AbortSignal };
 
-export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string };
+export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string; resolution?: string; ratio?: string; durationSeconds?: number };
 export type VideoGenerationTask = { id: string; provider: "openai" | "seedance"; model: string };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
@@ -126,35 +141,52 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
     assertSeedanceAudioReferences(audioReferences);
     const content = await buildSeedanceContent(config, prompt, references, videoReferences, audioReferences);
     if (!content.length) throw new Error("请输入视频提示词，或连接参考图片/视频/音频");
+    const requestModel = normalizeOfficialSeedanceModel(config.baseUrl, model);
     const payload = {
-        model: modelOptionName(model),
+        model: requestModel,
         content,
         ratio: normalizeSeedanceRatio(config.size),
-        resolution: normalizeSeedanceResolution(config.vquality, modelOptionName(model)),
+        resolution: normalizeSeedanceResolution(config.vquality, requestModel),
         duration: normalizeSeedanceDuration(config.videoSeconds),
         generate_audio: boolConfig(config.videoGenerateAudio, true),
         watermark: boolConfig(config.videoWatermark, false),
     };
 
     try {
-        const created = unwrapSeedanceTask((await axios.post<ApiEnvelope<SeedanceTask>>(seedanceApiUrl(config), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal })).data);
+        const response = await axios.post<ApiEnvelope<SeedanceTask>>(seedanceApiUrl(config), payload, { headers: aiHeaders(config, "application/json"), signal: options?.signal });
+        assertOfficialArkProxyResponse(response, config);
+        const created = unwrapSeedanceTask(response.data);
         if (!created.id) throw new Error("Seedance 接口没有返回任务 ID");
         return { id: created.id, provider: "seedance", model };
     } catch (error) {
-        throw new Error(readAxiosError(error, "Seedance 任务创建失败"));
+        throw new Error(readSeedanceAxiosError(error, config, "Seedance 任务创建失败"));
     }
 }
 
 async function pollSeedanceTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     try {
-        const state = unwrapSeedanceTask((await axios.get<ApiEnvelope<SeedanceTask>>(seedanceApiUrl(config, task.id), { headers: aiHeaders(config), signal: options?.signal })).data);
+        const response = await axios.get<ApiEnvelope<SeedanceTask>>(seedanceApiUrl(config, task.id), { headers: aiHeaders(config), signal: options?.signal });
+        assertOfficialArkProxyResponse(response, config);
+        const state = unwrapSeedanceTask(response.data);
         const url = videoResultUrl(state);
-        if (url) return { status: "completed", result: await videoResultFromUrl(url, options) };
+        if (url) {
+            const media = await videoResultFromUrl(url, options);
+            const durationSeconds = Number(state.duration);
+            return {
+                status: "completed",
+                result: {
+                    ...media,
+                    resolution: state.resolution,
+                    ratio: state.ratio,
+                    durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : undefined,
+                },
+            };
+        }
         if (state.status === "succeeded" || state.status === "completed") return { status: "failed", error: "Seedance 任务成功但没有返回视频 URL" };
         if (state.status === "failed" || state.status === "cancelled" || state.status === "expired") return { status: "failed", error: readApiErrorMessage(state.error?.message) || `Seedance 视频生成${state.status === "expired" ? "超时" : "失败"}` };
         return { status: "pending" };
     } catch (error) {
-        throw new Error(readAxiosError(error, "Seedance 任务查询失败"));
+        throw new Error(readSeedanceAxiosError(error, config, "Seedance 任务查询失败"));
     }
 }
 
@@ -181,7 +213,10 @@ function assertSeedanceAudioReferences(audioReferences: ReferenceAudio[]) {
 }
 
 function seedanceApiUrl(config: AiConfig, taskId?: string) {
-    return buildApiUrl(config.baseUrl, `/contents/generations/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ""}`);
+    const directUrl = buildApiUrl(officialArkVideoBaseUrl(config.baseUrl), `/contents/generations/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ""}`);
+    if (!isOfficialArkBaseUrl(config.baseUrl)) return directUrl;
+    const url = new URL(directUrl);
+    return `/api/ark${url.pathname}${url.search}`;
 }
 
 async function buildSeedanceContent(config: AiConfig, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
@@ -192,10 +227,10 @@ async function buildSeedanceContent(config: AiConfig, prompt: string, references
         content.push({ type: "image_url", image_url: { url: await resolveSeedanceImageUrl(config, image) }, role: "reference_image" });
     }
     for (const video of videoReferences.slice(0, SEEDANCE_REFERENCE_LIMITS.videos)) {
-        content.push({ type: "video_url", video_url: { url: await resolveSeedanceVideoUrl(video) }, role: "reference_video" });
+        content.push({ type: "video_url", video_url: { url: await resolveSeedanceVideoUrl(config, video) }, role: "reference_video" });
     }
     for (const audio of audioReferences.slice(0, SEEDANCE_REFERENCE_LIMITS.audios)) {
-        content.push({ type: "audio_url", audio_url: { url: await resolveSeedanceAudioUrl(audio) }, role: "reference_audio" });
+        content.push({ type: "audio_url", audio_url: { url: await resolveSeedanceAudioUrl(config, audio) }, role: "reference_audio" });
     }
     return content;
 }
@@ -208,8 +243,9 @@ async function resolveSeedanceImageUrl(config: AiConfig, image: ReferenceImage) 
     return dataUrl;
 }
 
-async function resolveSeedanceVideoUrl(video: ReferenceVideo) {
+async function resolveSeedanceVideoUrl(config: AiConfig, video: ReferenceVideo) {
     if (isPublicMediaUrl(video.url) || video.url.startsWith("asset://")) return video.url;
+    if (isOfficialArkBaseUrl(config.baseUrl)) throw new Error("官方 Ark 的参考视频必须使用公网 URL 或 asset:// 素材 ID");
     let blob: Blob | null = null;
     if (video.storageKey) blob = await getMediaBlob(video.storageKey);
     if (!blob && video.url?.startsWith("blob:")) blob = await (await fetch(video.url)).blob();
@@ -217,8 +253,9 @@ async function resolveSeedanceVideoUrl(video: ReferenceVideo) {
     return blobToDataUrl(blob);
 }
 
-async function resolveSeedanceAudioUrl(audio: ReferenceAudio) {
+async function resolveSeedanceAudioUrl(config: AiConfig, audio: ReferenceAudio) {
     if (isPublicMediaUrl(audio.url) || audio.url.startsWith("asset://")) return audio.url;
+    if (isOfficialArkBaseUrl(config.baseUrl)) throw new Error("官方 Ark 的参考音频必须使用公网 URL 或 asset:// 素材 ID");
     let blob: Blob | null = null;
     if (audio.storageKey) blob = await getMediaBlob(audio.storageKey);
     if (!blob && audio.url?.startsWith("blob:")) blob = await (await fetch(audio.url)).blob();
@@ -309,8 +346,31 @@ function readAxiosError(error: unknown, fallback: string) {
     return error instanceof Error ? readApiErrorMessage(error.message) || error.message : fallback;
 }
 
+function readSeedanceAxiosError(error: unknown, config: AiConfig, fallback: string) {
+    if (isOfficialArkBaseUrl(config.baseUrl) && axios.isAxiosError(error) && isLikelyMissingArkProxy(error.response)) {
+        return "当前部署未启用 Ark 同源代理，请使用新版 Vercel 或 Docker 配置重新部署";
+    }
+    return readAxiosError(error, fallback);
+}
+
+function assertOfficialArkProxyResponse(response: AxiosResponse<unknown>, config: AiConfig) {
+    if (isOfficialArkBaseUrl(config.baseUrl) && isLikelyMissingArkProxy(response)) {
+        throw new Error("当前部署未启用 Ark 同源代理，请使用新版 Vercel 或 Docker 配置重新部署");
+    }
+}
+
+function isLikelyMissingArkProxy(response: AxiosResponse<unknown> | undefined) {
+    if (!response) return false;
+    const contentType = String(response.headers?.["content-type"] || "").toLowerCase();
+    const text = typeof response.data === "string" ? response.data.trimStart().toLowerCase() : "";
+    if (contentType.includes("text/html") || text.startsWith("<!doctype html") || text.startsWith("<html")) return true;
+    const proxyHeader = String(response.headers?.["x-sun-canvas-ark-proxy"] || "");
+    return !proxyHeader && (response.status === 404 || response.status === 405) && !response.data;
+}
+
 function statusMessage(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return "鉴权失败，请检查 API Key、套餐权限或模型权限";
+    if (status === 413) return "参考素材请求体过大，请改用公网 URL 或 asset:// 素材 ID";
     if (status === 429) return "请求被限流或额度不足，请稍后重试";
     return status ? `${fallback}（${status}）` : fallback;
 }

@@ -3,12 +3,24 @@ import { CircleAlert, Cloud, KeyRound, Link2, Plus, RefreshCw, ShieldCheck, Tras
 import { useEffect, useState } from "react";
 
 import { ModelPicker } from "@/components/model-picker";
+import { ARK_AGENT_PLAN_SEEDANCE_MODELS, ARK_SEEDANCE_MODELS, isArkPlanBaseUrl, isOfficialArkBaseUrl } from "@/lib/seedance-video";
 import { fetchChannelModels } from "@/services/api/image";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { createModelChannel, defaultBaseUrlForApiFormat, filterModelsByCapability, modelOptionLabel, normalizeModelOptionValue, useConfigStore, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import {
+    createModelChannel,
+    defaultBaseUrlForApiFormat,
+    filterModelsByCapability,
+    modelOptionLabel,
+    normalizeModelOptionValue,
+    useConfigStore,
+    type ApiCallFormat,
+    type ConfigTabKey,
+    type ModelCapability,
+    type ModelChannel,
+} from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -109,6 +121,12 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         updateChannel(channel.id, { apiFormat, baseUrl });
     };
 
+    const applyOfficialSeedanceConfig = (channel: ModelChannel) => {
+        const nextChannel = withOfficialSeedanceModels(channel);
+        updateChannels(config.channels.map((item) => (item.id === channel.id ? nextChannel : item)));
+        message.success("已添加 Seedance 2.0 预置模型；是否可用取决于当前 Key 和套餐，请以实际生成结果为准");
+    };
+
     const addChannel = () => {
         updateChannels([...config.channels, createModelChannel({ name: `渠道 ${config.channels.length + 1}` })]);
     };
@@ -122,6 +140,10 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     };
 
     const refreshChannelModels = async (channel: ModelChannel) => {
+        if (isOfficialArkBaseUrl(channel.baseUrl)) {
+            applyOfficialSeedanceConfig(channel);
+            return;
+        }
         if (!channel.baseUrl.trim() || !channel.apiKey.trim()) {
             message.error("请先填写该渠道的 Base URL 和 API Key");
             return;
@@ -139,17 +161,17 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     };
 
     const refreshAllModels = async () => {
-        const runnable = config.channels.filter((channel) => channel.baseUrl.trim() && channel.apiKey.trim());
+        const runnable = config.channels.filter((channel) => channel.baseUrl.trim() && (isOfficialArkBaseUrl(channel.baseUrl) || channel.apiKey.trim()));
         if (!runnable.length) {
             message.error("请先填写至少一个渠道的 Base URL 和 API Key");
             return;
         }
         setLoadingChannelId("all");
         try {
-            const entries = await Promise.all(runnable.map(async (channel) => [channel.id, await fetchChannelModels(channel)] as const));
-            const modelMap = new Map(entries);
-            updateChannels(config.channels.map((channel) => (modelMap.has(channel.id) ? { ...channel, models: modelMap.get(channel.id) || [] } : channel)));
-            message.success("模型列表已更新");
+            const entries = await Promise.all(runnable.map(async (channel) => [channel.id, isOfficialArkBaseUrl(channel.baseUrl) ? withOfficialSeedanceModels(channel) : { ...channel, models: await fetchChannelModels(channel) }] as const));
+            const channelMap = new Map(entries);
+            updateChannels(config.channels.map((channel) => channelMap.get(channel.id) || channel));
+            message.success("模型列表与官方预置已更新");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "读取模型失败");
         } finally {
@@ -238,7 +260,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         <div className="flex w-fit max-w-full flex-wrap items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100">
                                             <CircleAlert className="size-3.5 shrink-0" />
                                             <span className="font-semibold">重要：</span>
-                                            <span>新增或拉取模型后，需要到“模型”Tab 选择可选项才会显示。</span>
+                                            <span>新增、更新或添加预置模型后，需要到“模型”Tab 选择可选项才会显示。</span>
                                             <Button type="link" size="small" className="h-auto p-0 text-xs font-semibold text-amber-900 dark:text-amber-100" onClick={() => setActiveTab("models")}>
                                                 去模型设置
                                             </Button>
@@ -246,7 +268,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                     </div>
                                     <div className="flex shrink-0 gap-2">
                                         <Button icon={<RefreshCw className="size-4" />} loading={Boolean(loadingChannelId)} onClick={() => void refreshAllModels()}>
-                                            拉取全部
+                                            更新全部
                                         </Button>
                                         <Button type="primary" icon={<Plus className="size-4" />} onClick={addChannel}>
                                             新增渠道
@@ -265,7 +287,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                                 </div>
                                                 <div className="flex shrink-0 gap-2">
                                                     <Button size="small" loading={loadingChannelId === channel.id} onClick={() => void refreshChannelModels(channel)}>
-                                                        拉取模型
+                                                        {isOfficialArkBaseUrl(channel.baseUrl) ? "添加预置模型" : "拉取模型"}
                                                     </Button>
                                                     <Button size="small" danger icon={<Trash2 className="size-3.5" />} onClick={() => deleteChannel(channel.id)} />
                                                 </div>
@@ -286,6 +308,21 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                                 <Form.Item label="模型列表" className="mb-0 md:col-span-2">
                                                     <Select mode="tags" showSearch allowClear maxTagCount="responsive" placeholder="输入模型名，或点击拉取模型" value={channel.models} onChange={(models) => updateChannel(channel.id, { models })} />
                                                 </Form.Item>
+                                                {isOfficialArkBaseUrl(channel.baseUrl) ? (
+                                                    <div className="flex flex-col gap-3 rounded-lg border border-amber-300/60 bg-amber-50/70 p-3 text-xs text-amber-950 md:col-span-2 sm:flex-row sm:items-center sm:justify-between dark:border-amber-800/70 dark:bg-amber-950/25 dark:text-amber-100">
+                                                        <div className="leading-5">
+                                                            <div className="font-semibold">Seedance 2.0 官方接入</div>
+                                                            <div className="opacity-75">
+                                                                {isArkPlanBaseUrl(channel.baseUrl)
+                                                                    ? "Agent Plan 会保留 /api/plan/v3 路径与模型别名。此处添加的是官方预置候选，不代表当前套餐已包含；可用性以套餐和实际调用结果为准。"
+                                                                    : "标准 Ark 使用 /api/v3 完整模型 ID。当前 API Key 无法自动读取已开通模型；此处仅添加官方预置候选，可用性以实际调用结果为准。"}
+                                                            </div>
+                                                        </div>
+                                                        <Button size="small" className="shrink-0" onClick={() => applyOfficialSeedanceConfig(channel)}>
+                                                            添加预置模型
+                                                        </Button>
+                                                    </div>
+                                                ) : null}
                                             </div>
                                         </section>
                                     ))}
@@ -453,7 +490,12 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                             <Input prefix={<Link2 className="mr-1 size-4 text-stone-400" />} value={agentUrl} placeholder="http://127.0.0.1:17371" onChange={(event) => updateAgentConfig({ url: event.target.value })} />
                                         </Form.Item>
                                         <Form.Item label="Connect token" className="mb-4">
-                                            <Input.Password prefix={<KeyRound className="mr-1 size-4 text-stone-400" />} value={agentToken} placeholder="自动发现，或手动填入 Connect token" onChange={(event) => updateAgentConfig({ token: event.target.value })} />
+                                            <Input.Password
+                                                prefix={<KeyRound className="mr-1 size-4 text-stone-400" />}
+                                                value={agentToken}
+                                                placeholder="自动发现，或手动填入 Connect token"
+                                                onChange={(event) => updateAgentConfig({ token: event.target.value })}
+                                            />
                                         </Form.Item>
                                     </div>
                                     {agentConnectError ? <div className="mb-3 rounded-md border border-red-200 px-3 py-2 text-xs text-red-600 dark:border-red-900/60">{agentConnectError}</div> : null}
@@ -519,6 +561,14 @@ function normalizeImageCount(value: string) {
 
 function uniqueModels(models: string[]) {
     return Array.from(new Set(models.map((model) => model.trim()).filter(Boolean)));
+}
+
+function withOfficialSeedanceModels(channel: ModelChannel): ModelChannel {
+    const presets = isArkPlanBaseUrl(channel.baseUrl) ? ARK_AGENT_PLAN_SEEDANCE_MODELS : ARK_SEEDANCE_MODELS;
+    return {
+        ...channel,
+        models: uniqueModels([...channel.models, ...presets]),
+    };
 }
 
 function apiFormatLabel(apiFormat: ApiCallFormat) {

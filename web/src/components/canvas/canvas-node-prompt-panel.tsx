@@ -142,6 +142,7 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
     return {
         ...globalConfig,
         model,
+        videoModel: mode === "video" ? model : globalConfig.videoModel,
         quality: node.metadata?.quality || globalConfig.quality || defaultConfig.quality,
         size: node.metadata?.size || globalConfig.size || defaultConfig.size,
         videoSeconds: node.metadata?.seconds || globalConfig.videoSeconds || defaultConfig.videoSeconds,

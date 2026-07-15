@@ -2,6 +2,19 @@ import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/sto
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
+export const ARK_SEEDANCE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+export const ARK_AGENT_PLAN_BASE_URL = "https://ark.cn-beijing.volces.com/api/plan/v3";
+export const ARK_SEEDANCE_MODELS = ["doubao-seedance-2-0-260128", "doubao-seedance-2-0-fast-260128"] as const;
+export const ARK_AGENT_PLAN_SEEDANCE_MODELS = ["doubao-seedance-2.0", "doubao-seedance-2.0-fast", "doubao-seedance-2.0-mini"] as const;
+
+const ARK_HOST = "ark.cn-beijing.volces.com";
+const ARK_SEEDANCE_MODEL_ALIASES: Record<string, (typeof ARK_SEEDANCE_MODELS)[number]> = {
+    "doubao-seedance-2.0": ARK_SEEDANCE_MODELS[0],
+    "doubao-seedance-2-0": ARK_SEEDANCE_MODELS[0],
+    "doubao-seedance-2.0-fast": ARK_SEEDANCE_MODELS[1],
+    "doubao-seedance-2-0-fast": ARK_SEEDANCE_MODELS[1],
+};
+
 export const SEEDANCE_REFERENCE_LIMITS = {
     images: 9,
     videos: 3,
@@ -71,13 +84,43 @@ export function isSeedanceFastModel(model: string) {
     return isSeedanceVideoModel(value) && value.includes("fast");
 }
 
+export function isSeedance720pModel(model: string) {
+    const value = model.toLowerCase();
+    return isSeedanceVideoModel(value) && (value.includes("fast") || value.includes("mini"));
+}
+
 export function isArkPlanBaseUrl(baseUrl: string) {
-    return baseUrl.toLowerCase().includes("ark.cn-beijing.volces.com/api/plan/v3") || baseUrl.toLowerCase().includes("/api/plan/v3");
+    try {
+        const path = new URL(baseUrl.trim()).pathname.toLowerCase().replace(/\/+$/, "");
+        return path === "/api/plan/v3" || path.startsWith("/api/plan/v3/");
+    } catch {
+        return baseUrl.toLowerCase().includes("/api/plan/v3");
+    }
+}
+
+export function isOfficialArkBaseUrl(baseUrl: string) {
+    try {
+        const url = new URL(baseUrl.trim());
+        return url.protocol === "https:" && url.hostname.toLowerCase() === ARK_HOST;
+    } catch {
+        return false;
+    }
+}
+
+export function officialArkVideoBaseUrl(baseUrl: string) {
+    if (!isOfficialArkBaseUrl(baseUrl)) return baseUrl;
+    return isArkPlanBaseUrl(baseUrl) ? ARK_AGENT_PLAN_BASE_URL : ARK_SEEDANCE_BASE_URL;
+}
+
+export function normalizeOfficialSeedanceModel(baseUrl: string, model: string) {
+    const name = modelOptionName(model).trim();
+    if (!isOfficialArkBaseUrl(baseUrl) || isArkPlanBaseUrl(baseUrl)) return name;
+    return ARK_SEEDANCE_MODEL_ALIASES[name.toLowerCase()] || name;
 }
 
 export function normalizeSeedanceResolution(value: string, model = "") {
     const normalized = normalizeResolutionToken(value);
-    if (isSeedanceFastModel(model) && normalized === "1080p") return "720p";
+    if (isSeedance720pModel(model) && normalized === "1080p") return "720p";
     return seedanceResolutionOptions.some((item) => item.value === normalized) ? normalized : "720p";
 }
 
@@ -121,6 +164,23 @@ export function seedancePixelLabel(resolution: string, ratio: string) {
     return seedancePixels[normalizedResolution][normalizedRatio] || "";
 }
 
+export function seedancePixelDimensions(resolution: string, ratio: string) {
+    const dimensions = seedancePixelLabel(resolution, ratio);
+    const match = dimensions.match(/^(\d+)x(\d+)$/);
+    if (!match) return null;
+    return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+export function seedanceVideoSpecForDimensions(width: number, height: number) {
+    const target = `${width}x${height}`;
+    for (const [resolution, ratios] of Object.entries(seedancePixels)) {
+        for (const [ratio, dimensions] of Object.entries(ratios)) {
+            if (dimensions === target) return { resolution, ratio };
+        }
+    }
+    return null;
+}
+
 export function boolConfig(value: string | undefined, fallback: boolean) {
     if (value === "true") return true;
     if (value === "false") return false;
@@ -134,11 +194,7 @@ export function seedanceReferenceLabel(kind: "image" | "video" | "audio", index:
 }
 
 export function buildSeedancePromptText(prompt: string, images: ReferenceImage[], videos: ReferenceVideo[], audios: ReferenceAudio[]) {
-    const labels = [
-        ...images.map((_, index) => seedanceReferenceLabel("image", index)),
-        ...videos.map((_, index) => seedanceReferenceLabel("video", index)),
-        ...audios.map((_, index) => seedanceReferenceLabel("audio", index)),
-    ];
+    const labels = [...images.map((_, index) => seedanceReferenceLabel("image", index)), ...videos.map((_, index) => seedanceReferenceLabel("video", index)), ...audios.map((_, index) => seedanceReferenceLabel("audio", index))];
     const text = prompt.trim();
     if (!labels.length) return text;
     return `参考素材编号：${labels.join("、")}。请按这些编号理解提示词中的图片、视频和音频引用。\n\n${text}`;
