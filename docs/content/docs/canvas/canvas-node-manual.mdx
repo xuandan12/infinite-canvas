@@ -52,6 +52,10 @@ description: 当前画布节点的主要用途与操作流程
 - 从文本、图片或配置节点创建视频生成时，会在右侧生成新的视频节点并自动连接。
 - 生成配置节点的视频模式会读取上游文本作为 prompt，读取上游图片作为参考图，读取上游视频作为参考视频，并在输入预览里显示参考视频。
 - 视频生成接口支持 OpenAI 风格的 `POST /v1/videos`、`GET /v1/videos/{id}` 和 `GET /v1/videos/{id}/content`。
+- `grok-imagine-video` 是 xAI 的视频生成模型。Grok 使用 JSON `POST /v1/videos/generations` 创建任务，再用 `GET /v1/videos/{request_id}` 轮询；不能沿用 OpenAI 风格视频接口的 multipart 请求体。
+- 官方 `https://api.x.ai` 渠道会经站点同源的 `/api/xai` 受限代理读取模型、创建任务和查询任务；模型发现会容错合并 `/v1/models` 与 `/v1/video-generation-models`。其它渠道只有在服务端实际实现 xAI 原生视频路径并允许浏览器访问时才能直连；模型出现在通用 `/models` 列表中并不能证明网关支持 Grok 视频。
+- Grok 支持 `480p`、`720p`，比例支持 `16:9`、`9:16`、`1:1`、`4:3`、`3:4`、`3:2`、`2:3`；文生视频和单图图生视频支持 1-15 秒，2-7 张图片的多图参考模式最多 10 秒。`1080p` 仅允许 `grok-imagine-video-1.5` 的单张参考图场景。本地大图会在发送前按代理安全体积自动压缩；如需保留原图质量，建议使用上游可访问的图片 URL。
+- Grok 不接收画布上游的参考视频或参考音频。画布视频节点、生成配置节点与视频创作台复用同一套 Grok 参数布局，切换模型后会按模型能力归一化比例、清晰度和时长。
 - 标准火山方舟 API 使用 `https://ark.cn-beijing.volces.com/api/v3`，模型名使用 `doubao-seedance-2-0-260128` 或 `doubao-seedance-2-0-fast-260128`。
 - Agent Plan 使用 `https://ark.cn-beijing.volces.com/api/plan/v3`，系统会原样保留该套餐路径和用户填写的模型别名，不会自动改成标准 API 或 dated 模型 ID。
 - Fast / Mini 支持 `480p` 与 `720p`。系统会把界面所选清晰度作为顶层 `resolution` 发送，并优先按视频真实元数据展示结果像素；读取不到时不会再伪报 `1280x720`。

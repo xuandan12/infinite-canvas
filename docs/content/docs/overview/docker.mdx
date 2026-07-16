@@ -49,4 +49,4 @@ docker compose -f docker-compose.local.yml up -d --build
 
 ## 数据说明
 
-当前主应用镜像由 Nginx 托管 Vite 静态产物，并仅为官方 Ark 的 Seedance 视频创建与查询路径提供同源代理。画布、我的素材、生成记录和 AI API Key 默认保存在浏览器本地；第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。
+当前主应用镜像由 Nginx 托管 Vite 静态产物，并仅为官方 Ark 的 Seedance 视频创建与查询路径，以及官方 xAI 的模型发现、Grok 视频创建与查询路径提供固定上游的同源受限代理。画布、我的素材、生成记录和 AI API Key 默认保存在浏览器本地；代理只转发当前请求，不持久化 API Key。第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。

@@ -17,7 +17,7 @@ description: 使用 Render 部署无限画布
 
 部署完成后，打开 Render 分配的 `.onrender.com` 域名即可访问。
 
-当前 Docker 镜像内置官方 Ark Seedance 2.0 的受限同源代理，同时支持标准 `https://ark.cn-beijing.volces.com/api/v3` 与 Agent Plan `https://ark.cn-beijing.volces.com/api/plan/v3`。创建与查询视频任务不会再由浏览器跨域直连 Ark。
+当前 Docker 镜像内置官方 Ark Seedance 2.0 与官方 xAI Grok Imagine Video 的受限同源代理：Ark 同时支持标准 `https://ark.cn-beijing.volces.com/api/v3` 与 Agent Plan `https://ark.cn-beijing.volces.com/api/plan/v3`，xAI 只允许模型发现、视频创建与按任务 ID 查询的固定路径。对应请求不会再由浏览器跨域直连官方上游。
 
 ## 免费版说明
 

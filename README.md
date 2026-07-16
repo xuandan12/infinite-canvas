@@ -32,7 +32,7 @@
 ## 核心功能
 
 - 无限画布：多画布项目、节点拖拽缩放、连线、小地图、撤销重做、导入导出。
-- AI 创作：支持文生图、图生图、参考图编辑、文本问答、音频和视频生成；普通兼容接口由浏览器直连，官方火山方舟 Seedance 2.0 标准 API 与 Agent Plan 通过站点同源代理接入。
+- AI 创作：支持文生图、图生图、参考图编辑、文本问答、音频和视频生成；普通兼容接口由浏览器直连，官方火山方舟 Seedance 2.0 标准 API、Agent Plan 与 xAI Grok Imagine Video 在本地 Vite、Vercel、Docker / Render 部署中通过站点同源受限代理接入；纯 GitHub Pages 不包含该代理。
 - 画布助手：围绕选中节点和上游节点对话、生图，并把结果插回画布。
 - 本地 Agent：通过本机 Canvas Agent 连接 Codex / Claude Code，让 Agent 通过 MCP 操作当前画布；
 - Codex App 插件：提供 Codex app 插件，安装后会自动注册 MCP 并尝试拉起本地 Agent。
