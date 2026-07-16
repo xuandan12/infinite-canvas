@@ -9,7 +9,7 @@ description: 用最少步骤把无限画布跑起来
 
 ## Vercel 部署
 
-在 Vercel 中导入仓库即可，根目录 `vercel.json` 会构建 `web/`。普通 OpenAI 兼容请求仍由浏览器直连；官方 Ark Seedance 2.0 的标准 API 与 Agent Plan 请求会由同源 Vercel Function 受限转发到固定的火山方舟地址，无需另建服务端。
+在 Vercel 中导入仓库即可，根目录 `vercel.json` 会构建 `web/`。普通 OpenAI 兼容请求仍由浏览器直连；官方 Ark Seedance 2.0 的标准 API 与 Agent Plan 请求会由同源 Vercel Function 受限转发到固定的火山方舟地址，官方 xAI 的模型发现、Grok 视频创建与查询会受限转发到固定的 `api.x.ai`，无需另建服务端。
 
 ## 本地启动
 
@@ -45,4 +45,4 @@ docker run --rm -p 3000:3000 infinite-canvas
 ## 说明
 
 - 当前画布项目和“我的素材”主要保存在浏览器本地，WebDAV 同步需要用户自行配置。
-- AI API Key 保存在浏览器本地。普通 OpenAI 兼容请求由前端直连；官方 Ark Seedance 请求只经当前站点的受限同源代理转发到火山方舟。
+- AI API Key 只持久化在浏览器本地。普通 OpenAI 兼容请求由前端直连；官方 Ark Seedance 与官方 xAI 请求会临时经当前站点的受限同源代理转发到固定上游，代理不持久化 Key。纯 GitHub Pages 不包含这些服务端代理。

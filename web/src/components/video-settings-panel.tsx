@@ -3,6 +3,17 @@ import { Switch } from "antd";
 
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import {
+    GROK_VIDEO_REFERENCE_LIMITS,
+    grokVideoDurationOptions,
+    grokVideoRatioOptions,
+    grokVideoResolutionOptions,
+    isGrokVideo15Model,
+    isGrokVideoModel,
+    normalizeGrokVideoDuration,
+    normalizeGrokVideoRatio,
+    normalizeGrokVideoResolution,
+} from "@/lib/grok-video";
+import {
     boolConfig,
     isSeedance720pModel,
     isSeedanceVideoConfig,
@@ -43,11 +54,15 @@ type VideoSettingsPanelProps = {
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
+    imageReferenceCount?: number;
 };
 
-export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5" }: VideoSettingsPanelProps) {
+export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", imageReferenceCount = 0 }: VideoSettingsPanelProps) {
     if (isSeedanceVideoConfig(config)) {
         return <SeedanceVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
+    }
+    if (isGrokVideoModel(modelOptionName(config.model || config.videoModel))) {
+        return <GrokVideoSettingsPanel config={config} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} imageReferenceCount={imageReferenceCount} />;
     }
 
     const seconds = config.videoSeconds || "6";
@@ -106,6 +121,77 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <NumberInput value={seconds} min={1} max={20} theme={theme} onChange={(value) => onConfigChange("videoSeconds", value)} />
                     </div>
                 </SettingGroup>
+            </div>
+        </ImageSettingsTheme>
+    );
+}
+
+function GrokVideoSettingsPanel({ config, onConfigChange, theme, showTitle, className, imageReferenceCount = 0 }: VideoSettingsPanelProps) {
+    const model = modelOptionName(config.model || config.videoModel);
+    const hasSingleImage = imageReferenceCount === 1;
+    const is15Model = isGrokVideo15Model(model);
+    const resolution = normalizeGrokVideoResolutionValue(config.vquality, model, hasSingleImage);
+    const ratio = normalizeGrokVideoRatio(config.size);
+    const duration = normalizeGrokVideoDuration(config.videoSeconds, imageReferenceCount);
+    const maximumDuration = imageReferenceCount > 1 ? GROK_VIDEO_REFERENCE_LIMITS.referenceDurationSeconds : 15;
+    const supports1080p = is15Model && hasSingleImage;
+
+    return (
+        <ImageSettingsTheme theme={theme}>
+            <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+                {showTitle ? <div className="text-lg font-semibold">Grok 视频设置</div> : null}
+                <SettingGroup title="分辨率" color={theme.node.muted}>
+                    <div className="grid grid-cols-2 gap-2.5">
+                        {grokVideoResolutionOptions
+                            .filter((item) => item.value !== "1080p" || supports1080p)
+                            .map((item) => (
+                                <OptionPill key={item.value} selected={resolution === item.value} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
+                                    {item.label}
+                                </OptionPill>
+                            ))}
+                    </div>
+                    <div className="text-[11px] leading-4 opacity-55">Grok 基础生成支持 480p / 720p；1080p 仅特定 1.5 图生视频场景开放。</div>
+                </SettingGroup>
+                <SettingGroup title="比例" color={theme.node.muted}>
+                    <div className="grid grid-cols-3 gap-2.5">
+                        {grokVideoRatioOptions.map((item) => (
+                            <button
+                                key={item.value}
+                                type="button"
+                                className="flex h-[68px] cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border bg-transparent px-1 text-sm transition hover:opacity-80"
+                                style={{ borderColor: ratio === item.value ? theme.node.text : theme.node.stroke, color: theme.node.text }}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onClick={() => onConfigChange("size", item.value)}
+                            >
+                                <SizePreview width={ratioPreview(item.value).width} height={ratioPreview(item.value).height} color={theme.node.text} />
+                                <span>{item.label}</span>
+                                <span className="text-[10px] leading-none opacity-55">{item.value}</span>
+                            </button>
+                        ))}
+                    </div>
+                </SettingGroup>
+                <SettingGroup title="时长" color={theme.node.muted}>
+                    <div className="grid grid-cols-4 gap-2.5">
+                        {grokVideoDurationOptions
+                            .filter((value) => value <= maximumDuration)
+                            .map((value) => (
+                                <OptionPill key={value} selected={duration === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
+                                    {value}s
+                                </OptionPill>
+                            ))}
+                    </div>
+                    <NumberInput value={String(duration)} min={1} max={maximumDuration} theme={theme} onChange={(value) => onConfigChange("videoSeconds", String(normalizeGrokVideoDuration(value, imageReferenceCount)))} />
+                    {imageReferenceCount > 1 ? (
+                        <div className="text-[11px] leading-4 opacity-55">多图参考模式最多 7 张，视频时长最多 10 秒。</div>
+                    ) : (
+                        <div className="text-[11px] leading-4 opacity-55">{hasSingleImage ? "单图图生视频" : "文生视频"}支持 1-15 秒。</div>
+                    )}
+                </SettingGroup>
+                <div className="space-y-1 text-[11px] leading-4 opacity-55">
+                    {is15Model ? <div>grok-imagine-video-1.5 需要且仅支持一张参考图。</div> : null}
+                    <div>需绑定官方 xAI 或支持 xAI 视频协议的渠道；模型出现在列表中不代表当前 Key 已开通。</div>
+                    <div>本地大图会按部署代理的安全体积自动压缩；如需保留原图，请使用上游可访问的图片 URL。</div>
+                </div>
             </div>
         </ImageSettingsTheme>
     );
@@ -192,13 +278,28 @@ export function videoSecondsLabel(value: string) {
     return `${value || "6"}s`;
 }
 
-export function videoSettingsSummary(config: Pick<AiConfig, "model" | "videoModel" | "baseUrl" | "vquality" | "size" | "videoSeconds">) {
+export function videoSettingsSummary(config: Pick<AiConfig, "model" | "videoModel" | "baseUrl" | "vquality" | "size" | "videoSeconds">, imageReferenceCount = 0) {
     if (!isSeedanceVideoConfig(config)) {
+        const model = modelOptionName(config.model || config.videoModel);
+        if (isGrokVideoModel(model)) {
+            const resolution = normalizeGrokVideoResolutionValue(config.vquality, model, imageReferenceCount === 1);
+            const ratio = normalizeGrokVideoRatio(config.size);
+            const ratioLabel = grokVideoRatioOptions.find((item) => item.value === ratio)?.label || ratio;
+            return `${resolution} · ${ratioLabel} · ${normalizeGrokVideoDuration(config.videoSeconds, imageReferenceCount)}s`;
+        }
         return `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
     }
     const model = modelOptionName(config.model || config.videoModel);
     const duration = normalizeSeedanceDuration(config.videoSeconds);
     return `${normalizeSeedanceResolution(config.vquality, model)} · ${videoSizeLabel(config.size)} · ${duration === -1 ? "智能" : `${duration}s`}`;
+}
+
+export function normalizeGrokVideoResolutionValue(value: string, model: string, hasImageReference = false) {
+    try {
+        return normalizeGrokVideoResolution(value, model, hasImageReference);
+    } catch {
+        return "720p";
+    }
 }
 
 export function normalizeVideoSizeValue(value: string) {
@@ -304,6 +405,8 @@ function ratioPreview(ratio: string) {
     if (ratio === "1:1") return { width: 1, height: 1 };
     if (ratio === "4:3") return { width: 4, height: 3 };
     if (ratio === "3:4") return { width: 3, height: 4 };
+    if (ratio === "3:2") return { width: 3, height: 2 };
+    if (ratio === "2:3") return { width: 2, height: 3 };
     if (ratio === "21:9") return { width: 21, height: 9 };
     if (ratio === "adaptive") return { width: 0, height: 0 };
     return { width: 16, height: 9 };

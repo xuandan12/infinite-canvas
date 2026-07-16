@@ -4,12 +4,17 @@
   "buildCommand": "cd web && bun run build",
   "outputDirectory": "web/dist",
   "functions": {
-    "api/ark/**/*.ts": { "maxDuration": 60 }
+    "api/ark/**/*.ts": { "maxDuration": 60 },
+    "api/xai/**/*.ts": { "maxDuration": 60 }
   },
   "rewrites": [
     {
       "source": "/api/ark/:path*",
       "destination": "/api/ark/:path*"
+    },
+    {
+      "source": "/api/xai/:path*",
+      "destination": "/api/xai/:path*"
     },
     { "source": "/(.*)", "destination": "/index.html" }
   ]

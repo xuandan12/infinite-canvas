@@ -8,12 +8,14 @@ import { saveAs } from "file-saver";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { ModelPicker } from "@/components/model-picker";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
-import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSettingsSummary } from "@/components/video-settings-panel";
+import { VideoSettingsPanel, normalizeGrokVideoResolutionValue, normalizeVideoResolutionValue, normalizeVideoSizeValue, videoSettingsSummary } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { GROK_VIDEO_REFERENCE_LIMITS, isGrokVideo15Model, isGrokVideoModel, normalizeGrokVideoDuration, normalizeGrokVideoRatio } from "@/lib/grok-video";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import {
     boolConfig,
     isSeedanceVideoConfig,
+    normalizeSeedanceDuration,
     normalizeSeedanceRatio,
     normalizeSeedanceResolution,
     seedancePixelDimensions,
@@ -115,6 +117,11 @@ export default function VideoPage() {
     const processedCommandRef = useRef(0);
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
+    const modelName = modelOptionName(model);
+    const grokVideo = isGrokVideoModel(modelName);
+    const grokVideo15 = isGrokVideo15Model(modelName);
+    const imageReferenceLimit = grokVideo15 ? 1 : grokVideo ? GROK_VIDEO_REFERENCE_LIMITS.images : SEEDANCE_REFERENCE_LIMITS.images;
+    const imageReferenceCount = references.length;
     const canGenerate = Boolean(prompt.trim());
 
     useEffect(() => {
@@ -127,13 +134,24 @@ export default function VideoPage() {
         void refreshLogs();
     }, []);
 
+    useEffect(() => {
+        if (!grokVideo) return;
+        const normalizedDuration = String(normalizeGrokVideoDuration(effectiveConfig.videoSeconds, imageReferenceCount));
+        const normalizedResolution = normalizeGrokVideoResolutionValue(effectiveConfig.vquality, modelName, imageReferenceCount === 1);
+        if (normalizedDuration !== effectiveConfig.videoSeconds) updateConfig("videoSeconds", normalizedDuration);
+        if (normalizedResolution !== effectiveConfig.vquality) updateConfig("vquality", normalizedResolution);
+    }, [effectiveConfig.videoSeconds, effectiveConfig.vquality, grokVideo, imageReferenceCount, modelName, updateConfig]);
+
     const addReferences = async (files?: FileList | null) => {
         const selectedFiles = Array.from(files || []);
         const unsupported = selectedFiles.filter((file) => !file.type.startsWith("image/") && !file.type.startsWith("video/") && !isSupportedAudioFile(file));
         if (unsupported.length) message.warning("已忽略不支持的参考素材，请使用图片、mp4/mov 视频或 mp3/wav 音频");
-        const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.images - references.length);
-        const videoFiles = selectedFiles.filter((file) => file.type.startsWith("video/") && file.size <= SEEDANCE_REFERENCE_LIMITS.videoMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.videos - videoReferences.length);
-        const audioFiles = selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.audios - audioReferences.length);
+        if (grokVideo && selectedFiles.some((file) => file.type.startsWith("video/") || isSupportedAudioFile(file))) {
+            message.warning("Grok 当前使用提示词与参考图；视频/音频参考请切换 Seedance");
+        }
+        const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/") && file.size <= SEEDANCE_REFERENCE_LIMITS.imageMaxBytes).slice(0, Math.max(0, imageReferenceLimit - references.length));
+        const videoFiles = grokVideo ? [] : selectedFiles.filter((file) => file.type.startsWith("video/") && file.size <= SEEDANCE_REFERENCE_LIMITS.videoMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.videos - videoReferences.length);
+        const audioFiles = grokVideo ? [] : selectedFiles.filter((file) => isSupportedAudioFile(file) && file.size <= SEEDANCE_REFERENCE_LIMITS.audioMaxBytes).slice(0, SEEDANCE_REFERENCE_LIMITS.audios - audioReferences.length);
         if (selectedFiles.some((file) => file.type.startsWith("image/") && file.size > SEEDANCE_REFERENCE_LIMITS.imageMaxBytes)) message.warning("已忽略超过 30MB 的参考图");
         if (selectedFiles.some((file) => file.type.startsWith("video/") && file.size > SEEDANCE_REFERENCE_LIMITS.videoMaxBytes)) message.warning("已忽略超过 50MB 的参考视频");
         if (selectedFiles.some((file) => isSupportedAudioFile(file) && file.size > SEEDANCE_REFERENCE_LIMITS.audioMaxBytes)) message.warning("已忽略超过 15MB 的参考音频");
@@ -159,7 +177,7 @@ export default function VideoPage() {
             ),
             message.warning,
         );
-        setReferences((value) => [...value, ...nextReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+        setReferences((value) => [...value, ...nextReferences].slice(0, imageReferenceLimit));
         setVideoReferences((value) => [...value, ...nextVideoReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
         setAudioReferences((value) => [...value, ...nextAudioReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.audios));
     };
@@ -173,12 +191,12 @@ export default function VideoPage() {
                 return;
             }
             const nextReferences = await Promise.all(
-                blobs.slice(0, SEEDANCE_REFERENCE_LIMITS.images - references.length).map(async (blob, index) => {
+                blobs.slice(0, Math.max(0, imageReferenceLimit - references.length)).map(async (blob, index) => {
                     const image = await uploadImage(blob);
                     return { id: nanoid(), name: `clipboard-${index + 1}.png`, type: image.mimeType, dataUrl: image.url, storageKey: image.storageKey };
                 }),
             );
-            setReferences((value) => [...value, ...nextReferences].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+            setReferences((value) => [...value, ...nextReferences].slice(0, imageReferenceLimit));
             message.success(`已读取 ${nextReferences.length} 张参考图`);
         } catch {
             message.error("剪切板里没有可读取的图片");
@@ -245,12 +263,18 @@ export default function VideoPage() {
             openConfigDialog(true);
             return null;
         }
-        const videoReferenceError = seedanceVideoReferenceError(videoReferences);
+        if (grokVideo15 && imageReferenceCount !== 1) {
+            message.error("grok-imagine-video-1.5 需要且仅支持一张参考图");
+            return null;
+        }
+        const requestVideoReferences = grokVideo ? [] : [...videoReferences];
+        const requestAudioReferences = grokVideo ? [] : [...audioReferences];
+        const videoReferenceError = seedanceVideoReferenceError(requestVideoReferences);
         if (videoReferenceError) {
             message.error(`${videoReferenceError}。${seedanceVideoReferenceHint}`);
             return null;
         }
-        return { text, config: buildVideoConfig(effectiveConfig, model), references: [...references], videoReferences: [...videoReferences], audioReferences: [...audioReferences] };
+        return { text, config: buildVideoConfig(effectiveConfig, model, imageReferenceCount), references: references.slice(0, imageReferenceLimit), videoReferences: requestVideoReferences, audioReferences: requestAudioReferences };
     };
 
     const retryResult = () => {
@@ -279,9 +303,13 @@ export default function VideoPage() {
             setPrompt(payload.content);
         } else if (payload.kind === "image") {
             const stored = await uploadImage(payload.dataUrl);
-            setReferences((value) => [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }].slice(0, SEEDANCE_REFERENCE_LIMITS.images));
+            setReferences((value) => [...value, { id: nanoid(), name: payload.title, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }].slice(0, imageReferenceLimit));
         } else if (payload.kind === "video") {
-            setVideoReferences((value) => [...value, { id: nanoid(), name: payload.title, type: "video/mp4", url: payload.url, storageKey: payload.storageKey, width: payload.width, height: payload.height }].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
+            if (grokVideo) {
+                message.warning("Grok 当前使用提示词与参考图；视频/音频参考请切换 Seedance");
+            } else {
+                setVideoReferences((value) => [...value, { id: nanoid(), name: payload.title, type: "video/mp4", url: payload.url, storageKey: payload.storageKey, width: payload.width, height: payload.height }].slice(0, SEEDANCE_REFERENCE_LIMITS.videos));
+            }
         }
         setAssetPickerOpen(false);
     };
@@ -336,7 +364,7 @@ export default function VideoPage() {
         setRunning(true);
         setStartedAt((value) => value || performance.now());
         setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
-        const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model);
+        const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model, log.references?.length || 0);
         try {
             for (let attempt = 0; attempt < 120; attempt += 1) {
                 const state = await pollVideoGenerationTask(configOverride || taskConfig, log.task);
@@ -378,7 +406,7 @@ export default function VideoPage() {
                 }
                 if (state.status === "failed") throw new Error(state.error);
                 if (attempt === 119) throw new Error("视频生成超时，请稍后重试");
-                await delay(log.task.provider === "seedance" ? 5000 : 2500);
+                await delay(log.task.provider === "openai" ? 2500 : 5000);
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
@@ -483,71 +511,77 @@ export default function VideoPage() {
                                             </button>
                                         </div>
                                     ))}
-                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考图，最多 9 张</div> : null}
+                                    {!references.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考图，当前模型最多 {imageReferenceLimit} 张</div> : null}
                                 </div>
                             </div>
 
-                            <div className="min-w-0">
-                                <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">参考视频</span>
-                                    <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
-                                        上传
-                                    </Button>
-                                </div>
-                                <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
-                                    {videoReferences.map((item, index) => (
-                                        <div key={item.id} className="group relative h-20 w-32 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-black dark:border-stone-800">
-                                            <video src={item.url} className="size-full object-cover" muted preload="metadata" />
-                                            <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("video", index)}</span>
-                                            <ReferenceOrderButtons index={index} total={videoReferences.length} onMove={(offset) => setVideoReferences((value) => moveListItem(value, index, offset))} />
-                                            <button
-                                                type="button"
-                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
-                                                onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))}
-                                                aria-label="移除参考视频"
-                                            >
-                                                <Trash2 className="size-3.5" />
-                                            </button>
+                            {grokVideo ? (
+                                <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-3 text-sm text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300">Grok 当前使用提示词与参考图；视频/音频参考请切换 Seedance。</div>
+                            ) : (
+                                <>
+                                    <div className="min-w-0">
+                                        <div className="mb-2 flex items-center justify-between gap-3">
+                                            <span className="text-base font-semibold">参考视频</span>
+                                            <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                                上传
+                                            </Button>
                                         </div>
-                                    ))}
-                                    {!videoReferences.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考视频，最多 3 个</div> : null}
-                                </div>
-                            </div>
+                                        <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
+                                            {videoReferences.map((item, index) => (
+                                                <div key={item.id} className="group relative h-20 w-32 shrink-0 overflow-hidden rounded-md border border-stone-200 bg-black dark:border-stone-800">
+                                                    <video src={item.url} className="size-full object-cover" muted preload="metadata" />
+                                                    <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("video", index)}</span>
+                                                    <ReferenceOrderButtons index={index} total={videoReferences.length} onMove={(offset) => setVideoReferences((value) => moveListItem(value, index, offset))} />
+                                                    <button
+                                                        type="button"
+                                                        className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                        onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                        aria-label="移除参考视频"
+                                                    >
+                                                        <Trash2 className="size-3.5" />
+                                                    </button>
+                                                </div>
+                                            ))}
+                                            {!videoReferences.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">暂无参考视频，最多 3 个</div> : null}
+                                        </div>
+                                    </div>
 
-                            <div className="min-w-0">
-                                <div className="mb-2 flex items-center justify-between gap-3">
-                                    <span className="text-base font-semibold">参考音频</span>
-                                    <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
-                                        上传
-                                    </Button>
-                                </div>
-                                <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
-                                    {audioReferences.map((item, index) => (
-                                        <div key={item.id} className="group relative flex h-20 w-48 shrink-0 flex-col justify-center gap-2 rounded-md border border-stone-200 bg-stone-50 px-2 dark:border-stone-800 dark:bg-stone-900">
-                                            <div className="flex min-w-0 items-center gap-2 text-xs text-stone-500 dark:text-stone-400">
-                                                <Music2 className="size-4 shrink-0" />
-                                                <span className="shrink-0 rounded bg-stone-200 px-1 text-[10px] text-stone-700 dark:bg-stone-800 dark:text-stone-200">{seedanceReferenceLabel("audio", index)}</span>
-                                                <span className="truncate">{item.name}</span>
-                                            </div>
-                                            <audio src={item.url} controls className="h-8 w-full" preload="metadata" />
-                                            <ReferenceOrderButtons index={index} total={audioReferences.length} onMove={(offset) => setAudioReferences((value) => moveListItem(value, index, offset))} />
-                                            <button
-                                                type="button"
-                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
-                                                onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))}
-                                                aria-label="移除参考音频"
-                                            >
-                                                <Trash2 className="size-3.5" />
-                                            </button>
+                                    <div className="min-w-0">
+                                        <div className="mb-2 flex items-center justify-between gap-3">
+                                            <span className="text-base font-semibold">参考音频</span>
+                                            <Button size="small" icon={<Upload className="size-3.5" />} onClick={() => fileInputRef.current?.click()}>
+                                                上传
+                                            </Button>
                                         </div>
-                                    ))}
-                                    {!audioReferences.length ? <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">暂无参考音频，最多 3 个，mp3/wav，单个 15MB 内</div> : null}
-                                </div>
-                            </div>
+                                        <div className="hover-scrollbar hover-scrollbar-hint flex min-h-24 w-full min-w-0 max-w-full gap-2 overflow-x-scroll overflow-y-hidden rounded-lg border border-dashed border-stone-300 p-2 pb-3 overscroll-x-contain dark:border-stone-700">
+                                            {audioReferences.map((item, index) => (
+                                                <div key={item.id} className="group relative flex h-20 w-48 shrink-0 flex-col justify-center gap-2 rounded-md border border-stone-200 bg-stone-50 px-2 dark:border-stone-800 dark:bg-stone-900">
+                                                    <div className="flex min-w-0 items-center gap-2 text-xs text-stone-500 dark:text-stone-400">
+                                                        <Music2 className="size-4 shrink-0" />
+                                                        <span className="shrink-0 rounded bg-stone-200 px-1 text-[10px] text-stone-700 dark:bg-stone-800 dark:text-stone-200">{seedanceReferenceLabel("audio", index)}</span>
+                                                        <span className="truncate">{item.name}</span>
+                                                    </div>
+                                                    <audio src={item.url} controls className="h-8 w-full" preload="metadata" />
+                                                    <ReferenceOrderButtons index={index} total={audioReferences.length} onMove={(offset) => setAudioReferences((value) => moveListItem(value, index, offset))} />
+                                                    <button
+                                                        type="button"
+                                                        className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                        onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                        aria-label="移除参考音频"
+                                                    >
+                                                        <Trash2 className="size-3.5" />
+                                                    </button>
+                                                </div>
+                                            ))}
+                                            {!audioReferences.length ? <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">暂无参考音频，最多 3 个，mp3/wav，单个 15MB 内</div> : null}
+                                        </div>
+                                    </div>
+                                </>
+                            )}
 
                             <div className="flex items-center justify-between rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm dark:border-stone-800 dark:bg-stone-900 sm:hidden">
                                 <span className="truncate text-stone-500 dark:text-stone-400">
-                                    {modelOptionLabel(effectiveConfig, model)} · {videoSettingsSummary({ ...effectiveConfig, model, videoModel: model })}
+                                    {modelOptionLabel(effectiveConfig, model)} · {videoSettingsSummary({ ...effectiveConfig, model, videoModel: model }, imageReferenceCount)}
                                 </span>
                                 <Button size="small" type="text" icon={<SlidersHorizontal className="size-4" />} onClick={() => setSettingsOpen(true)}>
                                     调整
@@ -555,7 +589,7 @@ export default function VideoPage() {
                             </div>
 
                             <div className="hidden gap-4 sm:grid sm:grid-cols-2">
-                                <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                                <GenerationSettings config={effectiveConfig} model={model} imageReferenceCount={imageReferenceCount} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
                             </div>
                         </div>
 
@@ -595,7 +629,7 @@ export default function VideoPage() {
             <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav"
+                accept={grokVideo ? "image/*" : "image/*,video/mp4,video/quicktime,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav"}
                 multiple
                 className="hidden"
                 onChange={(event) => {
@@ -616,7 +650,7 @@ export default function VideoPage() {
             </Drawer>
             <Drawer title="参数" placement="bottom" height="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
-                    <GenerationSettings config={effectiveConfig} model={model} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
+                    <GenerationSettings config={effectiveConfig} model={model} imageReferenceCount={imageReferenceCount} updateConfig={updateConfig} openConfigDialog={openConfigDialog} />
                 </div>
             </Drawer>
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
@@ -628,17 +662,49 @@ export default function VideoPage() {
     );
 }
 
-function GenerationSettings({ config, model, updateConfig, openConfigDialog }: { config: AiConfig; model: string; updateConfig: UpdateAiConfig; openConfigDialog: (shouldPromptContinue?: boolean) => void }) {
+function GenerationSettings({
+    config,
+    model,
+    imageReferenceCount,
+    updateConfig,
+    openConfigDialog,
+}: {
+    config: AiConfig;
+    model: string;
+    imageReferenceCount: number;
+    updateConfig: UpdateAiConfig;
+    openConfigDialog: (shouldPromptContinue?: boolean) => void;
+}) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    const changeModel = (value: string) => {
+        const name = modelOptionName(value);
+        const nextConfig = { ...config, model: value, videoModel: value };
+        updateConfig("videoModel", value);
+        if (isGrokVideoModel(name)) {
+            updateConfig("size", normalizeGrokVideoRatio(config.size));
+            updateConfig("vquality", normalizeGrokVideoResolutionValue(config.vquality, name, imageReferenceCount === 1));
+            updateConfig("videoSeconds", String(normalizeGrokVideoDuration(config.videoSeconds, imageReferenceCount)));
+            return;
+        }
+        if (isSeedanceVideoConfig(nextConfig)) {
+            updateConfig("size", normalizeSeedanceRatio(config.size));
+            updateConfig("vquality", normalizeSeedanceResolution(config.vquality, name));
+            updateConfig("videoSeconds", String(normalizeSeedanceDuration(config.videoSeconds)));
+            return;
+        }
+        updateConfig("size", normalizeVideoSize(config.size));
+        updateConfig("vquality", normalizeResolution(config.vquality));
+        updateConfig("videoSeconds", normalizeGenericVideoSeconds(config.videoSeconds));
+    };
 
     return (
         <>
             <label className="col-span-2 block min-w-0 sm:col-span-1">
                 <span className="mb-1.5 block text-sm font-semibold sm:mb-2 sm:text-base">模型</span>
-                <ModelPicker config={config} value={model} onChange={(value) => updateConfig("videoModel", value)} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
+                <ModelPicker config={config} value={model} onChange={changeModel} capability="video" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <VideoSettingsPanel config={{ ...config, model, videoModel: model }} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" />
+                <VideoSettingsPanel config={{ ...config, model, videoModel: model }} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" imageReferenceCount={imageReferenceCount} />
             </div>
         </>
     );
@@ -969,22 +1035,23 @@ function buildLog({
     };
 }
 
-function buildVideoConfig(config: AiConfig, model: string): AiConfig {
-    const seedance = isSeedanceVideoConfig({ ...config, model });
+function buildVideoConfig(config: AiConfig, model: string, imageReferenceCount = 0): AiConfig {
+    const name = modelOptionName(model);
+    const seedance = isSeedanceVideoConfig({ ...config, model, videoModel: model });
+    const grok = !seedance && isGrokVideoModel(name);
     return {
         ...config,
         model,
         videoModel: model,
-        size: seedance ? normalizeSeedanceRatio(config.size) : normalizeVideoSize(config.size),
-        videoSeconds: normalizeVideoSeconds(config.videoSeconds),
-        vquality: seedance ? normalizeSeedanceResolution(config.vquality, modelOptionName(model)) : normalizeResolution(config.vquality),
+        size: seedance ? normalizeSeedanceRatio(config.size) : grok ? normalizeGrokVideoRatio(config.size) : normalizeVideoSize(config.size),
+        videoSeconds: seedance ? String(normalizeSeedanceDuration(config.videoSeconds)) : grok ? String(normalizeGrokVideoDuration(config.videoSeconds, imageReferenceCount)) : normalizeGenericVideoSeconds(config.videoSeconds),
+        vquality: seedance ? normalizeSeedanceResolution(config.vquality, name) : grok ? normalizeGrokVideoResolutionValue(config.vquality, name, imageReferenceCount === 1) : normalizeResolution(config.vquality),
         videoGenerateAudio: String(boolConfig(config.videoGenerateAudio, true)),
         videoWatermark: String(boolConfig(config.videoWatermark, false)),
     };
 }
 
-function normalizeVideoSeconds(value: string) {
-    if (String(value).trim() === "-1") return "-1";
+function normalizeGenericVideoSeconds(value: string) {
     const seconds = Math.floor(Number(value) || 6);
     return String(Math.max(1, Math.min(20, seconds)));
 }

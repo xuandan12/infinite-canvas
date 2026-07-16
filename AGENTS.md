@@ -23,7 +23,7 @@
 
 - 前端使用 Vite、React、React Router、TypeScript、Ant Design、Tailwind、Zustand。
 - 编写 Ant Design 相关代码时，参考 https://ant.design/llms-full.txt 理解组件 API、示例和设计规范，并优先结合项目当前 antd 版本与既有写法。
-- 外部服务请求统一放在 `web/src/services/api/`。普通兼容接口由浏览器前端直连；官方火山方舟 Seedance 标准 API 与 Agent Plan 的创建、查询任务因 CORS 必须使用固定的同源 `/api/ark` 代理，不得恢复为浏览器直连或混用两类 Base URL。
+- 外部服务请求统一放在 `web/src/services/api/`。普通兼容接口由浏览器前端直连；官方火山方舟 Seedance 标准 API 与 Agent Plan 的创建、查询任务必须使用固定的同源 `/api/ark` 代理，官方 xAI 的模型发现、Grok 视频创建与查询必须使用固定的同源 `/api/xai` 代理，不得恢复为浏览器直连、扩大代理目标或混用不同渠道的 Base URL。
 - 全局或跨页面状态优先放在 `web/src/stores/`。
 - 已经放在全局 store 或全局 hook 中的状态/动作，组件需要时直接使用对应 store/hook，不要为了“纯组件”层层透传 props；避免一个组件传递过多参数。
 - 全局组件、全局常量、全局配置等全局性质的内容不要作为 props 或参数层层传递；哪里需要就在哪里直接从对应全局入口获取。
@@ -78,5 +78,5 @@
 ## 项目注意事项
 
 - 当前画布项目和“我的素材”主要保存在浏览器本地，不要在文档中误写成已支持云同步。
-- 当前 AI API Key 存在浏览器本地；普通兼容接口由前端直连，官方 Ark Seedance 请求经站点同源受限代理转发。涉及安全说明时要写清楚。
+- 当前 AI API Key 只持久化在浏览器本地；普通兼容接口由前端直连，官方 Ark Seedance 与官方 xAI 请求会临时经站点同源受限代理转发，代理不持久化 Key。涉及安全说明时要写清楚。
 - Docker 静态资源路径目前仍是待办项，文档中不要过度承诺生产部署已经完全验证。

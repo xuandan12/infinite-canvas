@@ -1,6 +1,21 @@
 import axios, { type AxiosResponse } from "axios";
 
 import { dataUrlToFile } from "@/lib/image-utils";
+import {
+    buildGrokVideoPayload,
+    buildNewApiGrokVideoPayload,
+    GROK_VIDEO_REFERENCE_LIMITS,
+    grokVideoRequestId,
+    isGrokVideoModel,
+    isOfficialXaiBaseUrl,
+    officialXaiApiUrl,
+    readGrokVideoTaskState,
+    readNewApiGrokVideoTaskState,
+    type GrokVideoCreateResponse,
+    type GrokVideoProtocol,
+    type GrokVideoTaskResponse,
+    type NewApiGrokVideoTaskResponse,
+} from "@/lib/grok-video";
 import { getMediaBlob, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { imageToDataUrl } from "@/services/image-storage";
 import {
@@ -37,12 +52,18 @@ type SeedanceTask = {
 type ApiEnvelope<T> = T | { code?: number | string; data?: T | null; msg?: string; message?: string; error?: { message?: string } };
 type RequestOptions = { signal?: AbortSignal };
 
+const GROK_PROXY_LOCAL_IMAGE_BUDGET_BYTES = 3 * 1024 * 1024;
+
 export type VideoGenerationResult = { blob?: Blob; url?: string; mimeType?: string; resolution?: string; ratio?: string; durationSeconds?: number };
-export type VideoGenerationTask = { id: string; provider: "openai" | "seedance"; model: string };
+export type VideoGenerationTask = { id: string; provider: "openai" | "seedance" | "grok"; model: string; protocol?: GrokVideoProtocol };
 export type VideoGenerationTaskState = { status: "pending" } | { status: "completed"; result: VideoGenerationResult } | { status: "failed"; error: string };
 
 function aiApiUrl(config: AiConfig, path: string) {
     return buildApiUrl(config.baseUrl, path);
+}
+
+function grokApiUrl(config: AiConfig, path: string) {
+    return officialXaiApiUrl(config.baseUrl, path) || aiApiUrl(config, path);
 }
 
 function aiHeaders(config: AiConfig, contentType?: string) {
@@ -54,7 +75,7 @@ function aiHeaders(config: AiConfig, contentType?: string) {
 
 export async function requestVideoGeneration(config: AiConfig, prompt: string, references: ReferenceImage[] = [], videoReferences: ReferenceVideo[] = [], audioReferences: ReferenceAudio[] = [], options?: RequestOptions): Promise<VideoGenerationResult> {
     const task = await createVideoGenerationTask(config, prompt, references, videoReferences, audioReferences, options);
-    const delayMs = task.provider === "seedance" ? 5000 : 2500;
+    const delayMs = task.provider === "openai" ? 2500 : 5000;
     for (let attempt = 0; attempt < 120; attempt += 1) {
         if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
         const state = await pollVideoGenerationTask(config, task, options);
@@ -76,13 +97,18 @@ export async function createVideoGenerationTask(config: AiConfig, prompt: string
     if (videoReferences.length || audioReferences.length) {
         throw new Error("当前视频接口不支持参考视频或参考音频，请切换到 Seedance 2.0 / 火山 Agent Plan 模型，或移除参考素材");
     }
+    if (isGrokVideoModel(requestConfig.model)) {
+        return createGrokVideoTask(requestConfig, selectedModel, prompt, references, options);
+    }
     return createOpenAIVideoTask(requestConfig, selectedModel, prompt, references, options);
 }
 
 export async function pollVideoGenerationTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
     const requestConfig = resolveModelRequestConfig(config, task.model);
     assertVideoConfig(requestConfig, requestConfig.model);
-    return task.provider === "seedance" ? pollSeedanceTask(requestConfig, task, options) : pollOpenAIVideoTask(requestConfig, task, options);
+    if (task.provider === "seedance") return pollSeedanceTask(requestConfig, task, options);
+    if (task.provider === "grok") return pollGrokVideoTask(requestConfig, task, options);
+    return pollOpenAIVideoTask(requestConfig, task, options);
 }
 
 export async function storeGeneratedVideo(result: VideoGenerationResult): Promise<UploadedFile> {
@@ -130,6 +156,60 @@ async function pollOpenAIVideoTask(config: AiConfig, task: VideoGenerationTask, 
         return { status: "pending" };
     } catch (error) {
         throw new Error(readAxiosError(error, "视频任务查询失败"));
+    }
+}
+
+async function createGrokVideoTask(config: AiConfig, model: string, prompt: string, references: ReferenceImage[], options?: RequestOptions): Promise<VideoGenerationTask> {
+    const protocol: GrokVideoProtocol = isOfficialXaiBaseUrl(config.baseUrl) ? "xai-native" : "newapi-video";
+    const sourceReferences = references.slice(0, GROK_VIDEO_REFERENCE_LIMITS.images);
+    const referenceUrls = await prepareGrokReferenceUrls(sourceReferences);
+    try {
+        const commonPayload = {
+            model: modelOptionName(model),
+            prompt,
+            duration: config.videoSeconds,
+            ratio: config.size,
+            resolution: config.vquality,
+            referenceUrls,
+        };
+        const response =
+            protocol === "xai-native"
+                ? await axios.post<ApiEnvelope<GrokVideoCreateResponse>>(grokApiUrl(config, "/videos/generations"), buildGrokVideoPayload(commonPayload), { headers: aiHeaders(config, "application/json"), signal: options?.signal })
+                : await axios.post<ApiEnvelope<GrokVideoCreateResponse>>(aiApiUrl(config, "/video/generations"), buildNewApiGrokVideoPayload(commonPayload), { headers: aiHeaders(config, "application/json"), signal: options?.signal });
+        if (protocol === "xai-native") assertOfficialXaiProxyResponse(response, config);
+        const created = unwrapEnvelope(response.data, "Grok 接口没有返回视频任务");
+        const id = grokVideoRequestId(created);
+        if (!id) throw new Error(protocol === "xai-native" ? "Grok 接口没有返回 request_id" : "New API 接口没有返回 task_id");
+        return { id, provider: "grok", model, protocol };
+    } catch (error) {
+        throw new Error(readGrokAxiosError(error, config, protocol, "Grok 视频任务创建失败"));
+    }
+}
+
+async function pollGrokVideoTask(config: AiConfig, task: VideoGenerationTask, options?: RequestOptions): Promise<VideoGenerationTaskState> {
+    const protocol: GrokVideoProtocol = task.protocol || (isOfficialXaiBaseUrl(config.baseUrl) ? "xai-native" : "newapi-video");
+    try {
+        const response =
+            protocol === "xai-native"
+                ? await axios.get<ApiEnvelope<GrokVideoTaskResponse>>(grokApiUrl(config, `/videos/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal })
+                : await axios.get<ApiEnvelope<NewApiGrokVideoTaskResponse>>(aiApiUrl(config, `/video/generations/${encodeURIComponent(task.id)}`), { headers: aiHeaders(config), signal: options?.signal });
+        if (protocol === "xai-native") assertOfficialXaiProxyResponse(response, config);
+        const state = unwrapEnvelope(response.data, protocol === "xai-native" ? "Grok 接口没有返回视频任务" : "New API 接口没有返回视频任务");
+        const taskState = protocol === "xai-native" ? readGrokVideoTaskState(state as GrokVideoTaskResponse) : readNewApiGrokVideoTaskState(state as NewApiGrokVideoTaskResponse);
+        if (taskState.status === "done") {
+            const result = await videoResultFromUrl(taskState.url, options);
+            return {
+                status: "completed",
+                result: {
+                    ...result,
+                    durationSeconds: taskState.durationSeconds,
+                },
+            };
+        }
+        if (taskState.status === "failed") return taskState;
+        return { status: "pending" };
+    } catch (error) {
+        throw new Error(readGrokAxiosError(error, config, protocol, "Grok 视频任务查询失败"));
     }
 }
 
@@ -243,6 +323,79 @@ async function resolveSeedanceImageUrl(config: AiConfig, image: ReferenceImage) 
     return dataUrl;
 }
 
+async function resolveGrokImageUrl(image: ReferenceImage) {
+    const directUrl = image.url || image.dataUrl;
+    if (/^https?:\/\//i.test(directUrl) || directUrl.startsWith("data:")) return directUrl;
+    const dataUrl = await imageToDataUrl(image);
+    if (!dataUrl) throw new Error("Grok 参考图读取失败，请换一张图片或重新上传");
+    return dataUrl;
+}
+
+async function prepareGrokReferenceUrls(references: ReferenceImage[]) {
+    const sourceUrls = await Promise.all(references.map(resolveGrokImageUrl));
+    const localImageCount = sourceUrls.filter((url) => url.startsWith("data:")).length;
+    if (!localImageCount) return sourceUrls;
+    const perImageBudget = Math.floor(GROK_PROXY_LOCAL_IMAGE_BUDGET_BYTES / localImageCount);
+    const urls = await Promise.all(sourceUrls.map((url) => (url.startsWith("data:") ? compressGrokReferenceDataUrl(url, perImageBudget) : url)));
+    const totalBytes = urls.reduce((total, url) => total + (url.startsWith("data:") ? dataUrlByteSize(url) : 0), 0);
+    if (totalBytes > GROK_PROXY_LOCAL_IMAGE_BUDGET_BYTES) throw new Error("Grok 本地参考图请求体仍然过大，请压缩图片或改用上游可访问的公网图片 URL");
+    return urls;
+}
+
+async function compressGrokReferenceDataUrl(dataUrl: string, maximumBytes: number) {
+    if (dataUrlByteSize(dataUrl) <= maximumBytes) return dataUrl;
+    if (typeof document === "undefined" || typeof Image === "undefined") throw new Error("Grok 参考图过大且当前环境无法压缩，请改用公网图片 URL");
+
+    const image = await loadDataUrlImage(dataUrl);
+    const longestSide = Math.max(image.naturalWidth, image.naturalHeight);
+    const byteScale = Math.min(1, Math.sqrt(maximumBytes / Math.max(1, dataUrlByteSize(dataUrl))) * 0.94);
+    let scale = Math.min(byteScale, 2048 / Math.max(1, longestSide));
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+        const width = Math.max(1, Math.round(image.naturalWidth * scale));
+        const height = Math.max(1, Math.round(image.naturalHeight * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Grok 参考图压缩失败，请换一张图片或使用公网图片 URL");
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, width, height);
+        context.drawImage(image, 0, 0, width, height);
+        const quality = Math.max(0.5, 0.86 - (attempt % 4) * 0.12);
+        const blob = await canvasToBlob(canvas, "image/jpeg", quality);
+        if (blob.size <= maximumBytes) return blobToDataUrl(blob);
+        if (attempt % 4 === 3) scale *= 0.78;
+    }
+    throw new Error("Grok 参考图压缩后仍超过代理限制，请先压缩图片或改用公网图片 URL");
+}
+
+function loadDataUrlImage(dataUrl: string) {
+    return new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("Grok 参考图读取失败，请换一张图片或使用公网图片 URL"));
+        image.src = dataUrl;
+    });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number) {
+    return new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Grok 参考图压缩失败，请换一张图片或使用公网图片 URL"))), type, quality);
+    });
+}
+
+function dataUrlByteSize(dataUrl: string) {
+    const commaIndex = dataUrl.indexOf(",");
+    if (commaIndex < 0) return new TextEncoder().encode(dataUrl).byteLength;
+    const metadata = dataUrl.slice(0, commaIndex);
+    const content = dataUrl.slice(commaIndex + 1);
+    if (/;base64/i.test(metadata)) {
+        const padding = content.endsWith("==") ? 2 : content.endsWith("=") ? 1 : 0;
+        return Math.max(0, Math.floor((content.length * 3) / 4) - padding);
+    }
+    return new TextEncoder().encode(dataUrl).byteLength;
+}
+
 async function resolveSeedanceVideoUrl(config: AiConfig, video: ReferenceVideo) {
     if (isPublicMediaUrl(video.url) || video.url.startsWith("asset://")) return video.url;
     if (isOfficialArkBaseUrl(config.baseUrl)) throw new Error("官方 Ark 的参考视频必须使用公网 URL 或 asset:// 素材 ID");
@@ -311,7 +464,8 @@ function unwrapSeedanceTask(payload: ApiEnvelope<SeedanceTask>) {
 function unwrapEnvelope<T>(payload: ApiEnvelope<T>, emptyMessage: string): T {
     if (!payload) throw new Error(emptyMessage);
     if (typeof payload === "object" && "code" in payload && payload.code !== undefined) {
-        if (payload.code !== 0 && payload.code !== "0") throw new Error(readApiErrorMessage(payload) || "请求失败");
+        const code = String(payload.code).trim().toLowerCase();
+        if (!["0", "200", "success", "ok"].includes(code)) throw new Error(readApiErrorMessage(payload) || "请求失败");
         if (!payload.data) throw new Error(emptyMessage);
         return payload.data;
     }
@@ -353,9 +507,30 @@ function readSeedanceAxiosError(error: unknown, config: AiConfig, fallback: stri
     return readAxiosError(error, fallback);
 }
 
+function readGrokAxiosError(error: unknown, config: AiConfig, protocol: GrokVideoProtocol, fallback: string) {
+    if (protocol === "newapi-video" && axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        const detail = readApiErrorMessage(error.response?.data);
+        if (/invalid api platform|invalid_api_platform/i.test(detail)) {
+            return "New API 已收到请求，但当前中转服务端没有为该 Grok 模型接入视频任务适配器；模型出现在列表中不代表视频协议已开通，请在中转后台启用支持 Grok 视频的渠道";
+        }
+        if ((status === 404 || status === 405) && (!detail || /not found|method not allowed/i.test(detail))) {
+            return "当前 New API 中转未开放标准视频接口 /v1/video/generations，请升级中转服务端或启用视频任务路由";
+        }
+    }
+    return readAxiosError(error, fallback);
+}
+
 function assertOfficialArkProxyResponse(response: AxiosResponse<unknown>, config: AiConfig) {
     if (isOfficialArkBaseUrl(config.baseUrl) && isLikelyMissingArkProxy(response)) {
         throw new Error("当前部署未启用 Ark 同源代理，请使用新版 Vercel 或 Docker 配置重新部署");
+    }
+}
+
+function assertOfficialXaiProxyResponse(response: AxiosResponse<unknown>, config: AiConfig) {
+    if (!isOfficialXaiBaseUrl(config.baseUrl)) return;
+    if (String(response.headers?.["x-sun-canvas-xai-proxy"] || "") !== "1") {
+        throw new Error("当前部署未启用 xAI 同源代理，请使用新版 Vercel 或 Docker 配置重新部署");
     }
 }
 
