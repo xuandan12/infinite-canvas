@@ -5,6 +5,7 @@ description: 当前版本已实现但仍需人工验证的变更项
 
 # 待测试
 
+- 视频比例展示：Seedance 与 Grok 的比例卡片改为以 `16:9`、`9:16`、`1:1` 等标准比例为主、横屏/竖屏等场景说明为辅，并通过共享设置面板同步到视频创作台和画布；需验证切换比例后的实际请求值、生成记录与画布设置摘要保持一致。
 - Grok Imagine Video 接入：Sun API / New API 灰度渠道已完成端到端验证，`grok-imagine-video` 的 720p 文生视频与 `grok-imagine-video-1.5-preview` 的单图 1080p 图生视频均能创建、轮询、播放和下载。官方 xAI 渠道仍需用官方 Key 验证 `/api/xai` 同源代理、模型发现、JSON 创建及 `request_id` 轮询。
 - Grok Imagine Video 参数一致性：视频创作台已验证基础模型与 1.5 Preview 的主要文生/图生路径；仍需在空视频节点与生成配置节点切换 Grok/Seedance/通用模型，覆盖 7 种比例、`480p`、1/15 秒、多图参考最长 10 秒、最多 7 张参考图、拒绝参考视频/音频和手机原图自动压缩。
 - Seedance 2.0 官方接入：标准 `/api/v3` 与 Agent Plan `/api/plan/v3` 按渠道保留，Vite、Vercel、Docker / Render 通过固定同源 `/api/ark` 路由创建和查询任务；已用无效 Key 验证两条本地代理可到达 Ark，仍需在部署预览用有效套餐 Key 验证创建与轮询、主模型 / Fast / Mini 权限、Fast `480p` 请求与实际输出元数据，以及 GitHub Pages 给出缺少代理的明确提示。官方 Ark 只添加预置候选，不宣称能通过当前 Bearer Key 自动读取已开通模型。
