@@ -29,8 +29,9 @@ import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
+import { useGenerationRuntimeStore } from "@/stores/use-generation-runtime-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
-import { modelOptionLabel, modelOptionName, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { modelOptionLabel, modelOptionName, resolveModelRequestConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
@@ -60,6 +61,7 @@ type GenerationResult = {
 type GenerationLog = {
     id: string;
     createdAt: number;
+    updatedAt: number;
     title: string;
     prompt: string;
     time: string;
@@ -78,17 +80,17 @@ type GenerationLog = {
     error?: string;
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark">;
+type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vquality" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark"> & { sourceBaseUrl?: string };
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
 const LOG_STORE_KEY = "infinite-canvas:video_generation_logs";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
+const VIDEO_TASK_CREATION_TIMEOUT_MS = 120_000;
 
 export default function VideoPage() {
     const { message } = App.useApp();
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const activeLogIdsRef = useRef<Set<string>>(new Set());
     const config = useConfigStore((state) => state.config);
     const effectiveConfig = useEffectiveConfig();
     const updateConfig = useConfigStore((state) => state.updateConfig);
@@ -101,20 +103,29 @@ export default function VideoPage() {
     const [audioReferences, setAudioReferences] = useState<ReferenceAudio[]>([]);
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
-    const [running, setRunning] = useState(false);
     const [logsOpen, setLogsOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [promptDialogOpen, setPromptDialogOpen] = useState(false);
     const [assetPickerOpen, setAssetPickerOpen] = useState(false);
-    const [startedAt, setStartedAt] = useState(0);
     const [elapsedMs, setElapsedMs] = useState(0);
+    const [submitting, setSubmitting] = useState(false);
     const [selectedLogIds, setSelectedLogIds] = useState<string[]>([]);
     const [previewLog, setPreviewLog] = useState<GenerationLog | null>(null);
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
     const [autoRunToken, setAutoRunToken] = useState(0);
     const videoCommand = useWorkbenchAgentStore((state) => state.videoCommand);
     const clearVideoCommand = useWorkbenchAgentStore((state) => state.clearVideoCommand);
+    const videoLogRevision = useGenerationRuntimeStore((state) => state.videoLogRevision);
+    const activeVideoLogIds = useGenerationRuntimeStore((state) => state.activeVideoLogIds);
+    const logSyncActive = useGenerationRuntimeStore((state) => state.logSyncActive);
+    const notifyVideoLogs = useGenerationRuntimeStore((state) => state.notifyVideoLogs);
+    const beginVideoGeneration = useGenerationRuntimeStore((state) => state.beginVideoGeneration);
+    const finishVideoGeneration = useGenerationRuntimeStore((state) => state.finishVideoGeneration);
     const processedCommandRef = useRef(0);
+    const refreshRequestRef = useRef(0);
+    const previewLogIdRef = useRef<string | null>(null);
+    const draftSessionRef = useRef(false);
+    const submissionLockRef = useRef(false);
 
     const model = effectiveConfig.videoModel || effectiveConfig.model;
     const modelName = modelOptionName(model);
@@ -123,16 +134,53 @@ export default function VideoPage() {
     const imageReferenceLimit = grokVideo15 ? 1 : grokVideo ? GROK_VIDEO_REFERENCE_LIMITS.images : SEEDANCE_REFERENCE_LIMITS.images;
     const imageReferenceCount = references.length;
     const canGenerate = Boolean(prompt.trim());
+    const previewStartedAt = previewLog?.status === "生成中" ? previewLog.createdAt : 0;
+    const previewRunning = Boolean(previewStartedAt);
+    const activeVideoGenerationCount = activeVideoLogIds.size;
+    const backgroundGenerationCount = Math.max(0, activeVideoGenerationCount - (previewLog && activeVideoLogIds.has(previewLog.id) ? 1 : 0));
 
     useEffect(() => {
-        if (!running || !startedAt) return;
-        const timer = window.setInterval(() => setElapsedMs(performance.now() - startedAt), 1000);
-        return () => window.clearInterval(timer);
-    }, [running, startedAt]);
+        if (previewStartedAt) {
+            const updateElapsed = () => setElapsedMs(Date.now() - previewStartedAt);
+            updateElapsed();
+            const timer = window.setInterval(updateElapsed, 1000);
+            return () => window.clearInterval(timer);
+        }
+        setElapsedMs(0);
+    }, [previewStartedAt]);
+
+    const beginSubmission = () => {
+        if (submissionLockRef.current) return null;
+        submissionLockRef.current = true;
+        setSubmitting(true);
+        let released = false;
+        return () => {
+            if (released) return;
+            released = true;
+            submissionLockRef.current = false;
+            setSubmitting(false);
+        };
+    };
 
     useEffect(() => {
         void refreshLogs();
-    }, []);
+    }, [videoLogRevision]);
+
+    useEffect(() => {
+        const nextLog = previewLog ? logs.find((log) => log.id === previewLog.id) : draftSessionRef.current ? undefined : logs.find((log) => log.status === "生成中");
+        if (!nextLog) {
+            if (previewLog && !logs.some((log) => log.id === previewLog.id)) {
+                previewLogIdRef.current = null;
+                setPreviewLog(null);
+                setResults([]);
+            }
+            return;
+        }
+        if (nextLog.id === previewLog?.id && nextLog.updatedAt === previewLog.updatedAt) return;
+        previewLogIdRef.current = nextLog.id;
+        setPreviewLog(nextLog);
+        setResults(resultsFromVideoLog(nextLog));
+    }, [logs, previewLog]);
 
     useEffect(() => {
         if (!grokVideo) return;
@@ -205,35 +253,59 @@ export default function VideoPage() {
     const generate = async () => {
         const snapshot = buildRequestSnapshot();
         if (!snapshot) return;
+        const pendingLog = buildLog({
+            prompt: snapshot.text,
+            model,
+            config: snapshot.config,
+            references: snapshot.references,
+            videoReferences: snapshot.videoReferences,
+            audioReferences: snapshot.audioReferences,
+            durationMs: 0,
+            status: "生成中",
+        });
+        const releaseSubmission = beginSubmission();
+        if (!releaseSubmission) return;
+        if (!beginVideoGeneration(pendingLog.id)) {
+            releaseSubmission();
+            message.warning("生成记录正在同步，请稍后重试");
+            return;
+        }
+        draftSessionRef.current = false;
         setElapsedMs(0);
-        setRunning(true);
-        setPreviewLog(null);
-        setResults([{ id: nanoid(), status: "pending" }]);
+        previewLogIdRef.current = pendingLog.id;
+        setPreviewLog(pendingLog);
+        setResults([{ id: pendingLog.id, status: "pending" }]);
         const batchStartedAt = performance.now();
-        setStartedAt(batchStartedAt);
         try {
-            const task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences);
-            const log = buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: 0, status: "生成中", task });
+            await saveLog(pendingLog);
+            releaseSubmission();
+            const taskController = new AbortController();
+            const taskTimeout = window.setTimeout(() => taskController.abort(), VIDEO_TASK_CREATION_TIMEOUT_MS);
+            let task: VideoGenerationTask;
+            try {
+                task = await createVideoGenerationTask(snapshot.config, snapshot.text, snapshot.references, snapshot.videoReferences, snapshot.audioReferences, { signal: taskController.signal });
+            } finally {
+                window.clearTimeout(taskTimeout);
+            }
+            const log = { ...pendingLog, task };
             await saveLog(log);
-            void pollGenerationLog(log, snapshot.config);
+            void pollGenerationLog(log, snapshot.config, true);
+            releaseSubmission();
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
-            setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
-            await saveLog(
-                buildLog({
-                    prompt: snapshot.text,
-                    model,
-                    config: snapshot.config,
-                    references: snapshot.references,
-                    videoReferences: snapshot.videoReferences,
-                    audioReferences: snapshot.audioReferences,
-                    durationMs: performance.now() - batchStartedAt,
-                    status: "失败",
-                    error: errorMessage,
-                }),
-            );
+            const failedLog: GenerationLog = { ...pendingLog, durationMs: performance.now() - batchStartedAt, status: "失败", error: errorMessage };
+            if (previewLogIdRef.current === pendingLog.id) {
+                setPreviewLog(failedLog);
+                setResults([{ id: pendingLog.id, status: "failed", error: errorMessage }]);
+            }
+            try {
+                await saveLog(failedLog);
+            } catch {
+                // IndexedDB 不可用时仍要释放运行锁，并把原始错误反馈给用户。
+            }
             message.error(errorMessage);
-            setRunning(false);
+            finishVideoGeneration(pendingLog.id);
+            releaseSubmission();
         }
     };
 
@@ -243,14 +315,22 @@ export default function VideoPage() {
         processedCommandRef.current = videoCommand.nonce;
         clearVideoCommand();
         if (typeof videoCommand.prompt === "string") setPrompt(videoCommand.prompt);
-        if (videoCommand.run && !running) setAutoRunToken((value) => value + 1);
-    }, [videoCommand, clearVideoCommand, running]);
+        if (videoCommand.run) {
+            draftSessionRef.current = true;
+            previewLogIdRef.current = null;
+            setPreviewLog(null);
+            setResults([]);
+            setElapsedMs(0);
+            setAutoRunToken((value) => value + 1);
+        }
+    }, [videoCommand, clearVideoCommand]);
 
     useEffect(() => {
-        if (!autoRunToken) return;
+        if (!autoRunToken || submitting) return;
+        setAutoRunToken(0);
         void generate();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [autoRunToken]);
+    }, [autoRunToken, submitting]);
 
     const buildRequestSnapshot = () => {
         const text = prompt.trim();
@@ -315,38 +395,65 @@ export default function VideoPage() {
     };
 
     const createSession = () => {
+        draftSessionRef.current = true;
         setPrompt("");
         setReferences([]);
         setVideoReferences([]);
         setAudioReferences([]);
         setResults([]);
         setElapsedMs(0);
-        setStartedAt(0);
         setSelectedLogIds([]);
+        previewLogIdRef.current = null;
         setPreviewLog(null);
     };
 
-    const deleteSelectedLogs = () => {
+    const deleteSelectedLogs = async () => {
         const mediaKeys = logs
             .filter((log) => selectedLogIds.includes(log.id))
             .map((log) => log.video?.storageKey)
             .filter((key): key is string => Boolean(key));
-        void Promise.all([deleteStoredMedia(mediaKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(refreshLogs);
-        if (previewLog && selectedLogIds.includes(previewLog.id)) {
-            setPreviewLog(null);
-            setResults([]);
+        try {
+            await Promise.all([deleteStoredMedia(mediaKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]);
+        } catch {
+            message.error("部分生成记录删除失败，请重试");
+        } finally {
+            notifyVideoLogs();
+            if (previewLog && selectedLogIds.includes(previewLog.id)) {
+                previewLogIdRef.current = null;
+                setPreviewLog(null);
+                setResults([]);
+            }
+            setSelectedLogIds([]);
+            setDeleteConfirmOpen(false);
         }
-        setSelectedLogIds([]);
-        setDeleteConfirmOpen(false);
     };
 
     const saveLog = async (log: GenerationLog) => {
-        await logStore.setItem(log.id, serializeLog(log));
-        await refreshLogs();
+        const nextLog = { ...log, updatedAt: Date.now() };
+        setLogs((value) => upsertLog(value, nextLog));
+        await logStore.setItem(nextLog.id, serializeLog(nextLog));
+        notifyVideoLogs();
+        return nextLog;
     };
 
     const refreshLogs = async () => {
-        const nextLogs = await readStoredLogs();
+        const requestId = ++refreshRequestRef.current;
+        const activeIds = useGenerationRuntimeStore.getState().activeVideoLogIds;
+        const interruptedLogs: GenerationLog[] = [];
+        const nextLogs = (await readStoredLogs()).map((log) => {
+            if (log.status !== "生成中" || log.task || activeIds.has(log.id)) return log;
+            const interruptedLog: GenerationLog = {
+                ...log,
+                updatedAt: Date.now(),
+                durationMs: Math.max(log.durationMs, Date.now() - log.createdAt),
+                status: "失败" as const,
+                error: "页面刷新时任务尚未创建完成，请重试",
+            };
+            interruptedLogs.push(interruptedLog);
+            return interruptedLog;
+        });
+        if (interruptedLogs.length) await Promise.all(interruptedLogs.map((log) => logStore.setItem(log.id, serializeLog(log))));
+        if (requestId !== refreshRequestRef.current) return nextLogs;
         setLogs(nextLogs);
         resumePendingLogs(nextLogs);
         return nextLogs;
@@ -358,14 +465,25 @@ export default function VideoPage() {
         }
     };
 
-    const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig) => {
-        if (!log.task || activeLogIdsRef.current.has(log.id)) return;
-        activeLogIdsRef.current.add(log.id);
-        setRunning(true);
-        setStartedAt((value) => value || performance.now());
-        setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
-        const taskConfig = buildVideoConfig({ ...effectiveConfig, ...log.config }, log.task.model || log.model, log.references?.length || 0);
+    const pollGenerationLog = async (log: GenerationLog, configOverride?: AiConfig, ownsActiveGeneration = false) => {
+        if (!log.task) return;
+        const activeIds = useGenerationRuntimeStore.getState().activeVideoLogIds;
+        if (ownsActiveGeneration) {
+            if (!activeIds.has(log.id) && !beginVideoGeneration(log.id)) return;
+        } else if (!beginVideoGeneration(log.id)) {
+            return;
+        }
+        if (previewLogIdRef.current === log.id) {
+            setResults((value) => (value.length ? value : [{ id: log.id, status: "pending" }]));
+        }
         try {
+            const sourceConfig = configOverride || effectiveConfig;
+            const taskModel = log.task.model || log.model;
+            const resolvedSource = resolveModelRequestConfig(sourceConfig, taskModel);
+            if (!configOverride && log.config.sourceBaseUrl && normalizeBaseUrl(log.config.sourceBaseUrl) !== normalizeBaseUrl(resolvedSource.baseUrl)) {
+                throw new Error("原视频任务的生成渠道已变更，无法安全恢复轮询；请恢复原渠道配置后重试");
+            }
+            const taskConfig = buildVideoConfig({ ...sourceConfig, ...log.config }, taskModel, log.references?.length || 0);
             for (let attempt = 0; attempt < 120; attempt += 1) {
                 const state = await pollVideoGenerationTask(configOverride || taskConfig, log.task);
                 if (state.status === "completed") {
@@ -396,8 +514,13 @@ export default function VideoPage() {
                         requestedResolution,
                         dimensionsSource: storedWidth && storedHeight ? "metadata" : taskDimensions ? "task" : undefined,
                     };
-                    setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
-                    await saveLog({ ...log, status: "成功", durationMs: generationElapsedMs, video: nextVideo, error: undefined });
+                    if (previewLogIdRef.current === log.id) setResults([{ id: nextVideo.id, status: "success", video: nextVideo }]);
+                    try {
+                        await saveLog({ ...log, status: "成功", durationMs: generationElapsedMs, video: nextVideo, error: undefined });
+                    } catch {
+                        message.error("视频已生成，但生成记录保存失败；请立即下载当前结果");
+                        return;
+                    }
                     if (seedance && actualResolution && actualResolution !== requestedResolution) {
                         message.warning(`已请求 ${requestedResolution}，但 Ark 结果为 ${actualResolution}；已按实际结果记录`);
                     }
@@ -410,19 +533,21 @@ export default function VideoPage() {
             }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
-            setResults([{ id: log.id, status: "failed", error: errorMessage }]);
-            await saveLog({ ...log, status: "失败", durationMs: Date.now() - log.createdAt, error: errorMessage });
+            if (previewLogIdRef.current === log.id) setResults([{ id: log.id, status: "failed", error: errorMessage }]);
+            try {
+                await saveLog({ ...log, status: "失败", durationMs: Date.now() - log.createdAt, error: errorMessage });
+            } catch {
+                // 保留原始生成错误；日志持久化异常不应形成未处理 Promise。
+            }
             message.error(errorMessage);
         } finally {
-            activeLogIdsRef.current.delete(log.id);
-            if (!activeLogIdsRef.current.size) {
-                setRunning(false);
-                setStartedAt(0);
-            }
+            finishVideoGeneration(log.id);
         }
     };
 
     const previewGenerationLog = (log: GenerationLog) => {
+        draftSessionRef.current = false;
+        previewLogIdRef.current = log.id;
         setPreviewLog(log);
         setLogsOpen(false);
         setPrompt(log.prompt);
@@ -435,7 +560,7 @@ export default function VideoPage() {
         if (log.config.videoSeconds) updateConfig("videoSeconds", log.config.videoSeconds);
         if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
         if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
-        setResults(log.status === "生成中" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || "生成失败" }]);
+        setResults(resultsFromVideoLog(log));
     };
 
     return (
@@ -594,8 +719,8 @@ export default function VideoPage() {
                         </div>
 
                         <div className="mt-auto pt-6">
-                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
-                                开始生成
+                            <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={submitting} disabled={!canGenerate || submitting || previewRunning || logSyncActive} onClick={() => void generate()}>
+                                {logSyncActive ? "正在同步生成记录" : previewRunning ? "当前任务生成中" : activeVideoGenerationCount ? "继续生成" : "开始生成"}
                             </Button>
                         </div>
                     </div>
@@ -603,7 +728,14 @@ export default function VideoPage() {
                     <div className="thin-scrollbar rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:min-h-0 lg:overflow-y-auto lg:p-5">
                         <div className="mb-4 flex items-center justify-between gap-3">
                             <h2 className="text-xl font-semibold">生成结果</h2>
-                            {running ? <Tag className="m-0 px-2 py-1">等待 {formatDuration(elapsedMs)}</Tag> : null}
+                            <div className="flex flex-wrap justify-end gap-2">
+                                {previewRunning ? <Tag className="m-0 px-2 py-1">生成中 {formatDuration(elapsedMs)}</Tag> : null}
+                                {backgroundGenerationCount ? (
+                                    <Tag color="processing" className="m-0 px-2 py-1">
+                                        后台任务 {backgroundGenerationCount}
+                                    </Tag>
+                                ) : null}
+                            </div>
                         </div>
                         {results.length ? (
                             <div className="grid gap-4">
@@ -611,7 +743,7 @@ export default function VideoPage() {
                                     result.status === "success" && result.video ? (
                                         <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} />
                                     ) : result.status === "failed" ? (
-                                        <FailedVideoCard key={result.id} error={result.error || "生成失败"} onRetry={retryResult} />
+                                        <FailedVideoCard key={result.id} error={result.error || "生成失败"} retryDisabled={submitting} onRetry={retryResult} />
                                     ) : (
                                         <PendingVideoCard key={result.id} />
                                     ),
@@ -757,7 +889,7 @@ function PendingVideoCard() {
     );
 }
 
-function FailedVideoCard({ error, onRetry }: { error: string; onRetry: () => void }) {
+function FailedVideoCard({ error, retryDisabled, onRetry }: { error: string; retryDisabled: boolean; onRetry: () => void }) {
     return (
         <div className="overflow-hidden rounded-lg border border-red-200 bg-red-50 dark:border-red-950 dark:bg-red-950/20">
             <div className="flex aspect-video flex-col items-center justify-center gap-3 p-5 text-center">
@@ -767,12 +899,22 @@ function FailedVideoCard({ error, onRetry }: { error: string; onRetry: () => voi
                 </Typography.Paragraph>
             </div>
             <div className="flex justify-end border-t border-red-200 p-3 dark:border-red-950">
-                <Button size="small" danger onClick={onRetry}>
-                    重试
+                <Button size="small" danger disabled={retryDisabled} onClick={onRetry}>
+                    重新生成
                 </Button>
             </div>
         </div>
     );
+}
+
+function upsertLog(logs: GenerationLog[], log: GenerationLog) {
+    return [log, ...logs.filter((item) => item.id !== log.id)].sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function resultsFromVideoLog(log: GenerationLog): GenerationResult[] {
+    if (log.status === "生成中") return [{ id: log.id, status: "pending" }];
+    if (log.video) return [{ id: log.video.id, status: "success", video: log.video }];
+    return [{ id: log.id, status: "failed", error: log.error || "生成失败" }];
 }
 
 function LogPanel({
@@ -792,8 +934,10 @@ function LogPanel({
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
 }) {
-    const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
-    const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
+    const activeLogIds = useGenerationRuntimeStore((state) => state.activeVideoLogIds);
+    const selectableLogs = logs.filter((log) => log.status !== "生成中" && !activeLogIds.has(log.id));
+    const allSelected = Boolean(selectableLogs.length) && selectableLogs.every((log) => selectedLogIds.includes(log.id));
+    const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : selectableLogs.map((log) => log.id));
 
     return (
         <>
@@ -805,7 +949,7 @@ function LogPanel({
                 <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
                     新建
                 </Button>
-                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
+                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!selectableLogs.length} onClick={toggleAll}>
                     {allSelected ? "取消" : "全选"}
                 </Button>
                 <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
@@ -819,6 +963,7 @@ function LogPanel({
                         log={log}
                         selected={selectedLogIds.includes(log.id)}
                         active={activeLogId === log.id}
+                        deletionDisabled={activeLogIds.has(log.id)}
                         onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
                         onClick={() => onPreviewLog(log)}
                     />
@@ -829,7 +974,7 @@ function LogPanel({
     );
 }
 
-function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
+function LogCard({ log, selected, active, deletionDisabled, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; deletionDisabled: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
     return (
         <button
             type="button"
@@ -837,7 +982,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
             onClick={onClick}
         >
             <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
-                <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
+                <Checkbox className="mt-0.5" checked={selected} disabled={log.status === "生成中" || deletionDisabled} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
                 <div className="min-w-0">
                     <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
                     <div className="mt-2 flex flex-wrap gap-1">
@@ -850,9 +995,11 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                     <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={log.status === "成功" ? "blue" : log.status === "生成中" ? "processing" : "red"}>
                         {log.status}
                     </Tag>
-                    <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="green">
-                        {formatDuration(log.durationMs)}
-                    </Tag>
+                    {log.status !== "生成中" ? (
+                        <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="green">
+                            {formatDuration(log.durationMs)}
+                        </Tag>
+                    ) : null}
                 </div>
             </div>
         </button>
@@ -896,6 +1043,7 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
     return {
         id: log.id || nanoid(),
         createdAt: log.createdAt || Date.now(),
+        updatedAt: log.updatedAt || log.createdAt || Date.now(),
         title: log.title || log.model || "未命名",
         prompt: log.prompt || "",
         time: log.time || new Date().toLocaleString("zh-CN", { hour12: false }),
@@ -976,6 +1124,7 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         videoSeconds: log.config?.videoSeconds || log.seconds || "",
         videoGenerateAudio: log.config?.videoGenerateAudio || "true",
         videoWatermark: log.config?.videoWatermark || "false",
+        sourceBaseUrl: log.config?.sourceBaseUrl,
     };
 }
 
@@ -1004,6 +1153,7 @@ function buildLog({
     video?: GeneratedVideo;
     error?: string;
 }): GenerationLog {
+    const requestConfig = resolveModelRequestConfig(config, config.videoModel || model);
     const logConfig = {
         model: config.model,
         videoModel: config.videoModel,
@@ -1012,10 +1162,12 @@ function buildLog({
         videoSeconds: config.videoSeconds,
         videoGenerateAudio: config.videoGenerateAudio,
         videoWatermark: config.videoWatermark,
+        sourceBaseUrl: requestConfig.baseUrl,
     };
     return {
         id: nanoid(),
         createdAt: Date.now(),
+        updatedAt: Date.now(),
         title: prompt.slice(0, 12) || "未命名",
         prompt,
         time: new Date().toLocaleString("zh-CN", { hour12: false }),
@@ -1062,6 +1214,10 @@ function normalizeVideoSize(value: string) {
 
 function normalizeResolution(value: string) {
     return normalizeVideoResolutionValue(value);
+}
+
+function normalizeBaseUrl(value: string) {
+    return value.trim().replace(/\/+$/, "");
 }
 
 function delay(ms: number) {

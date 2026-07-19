@@ -333,8 +333,8 @@ function InfiniteCanvasPage() {
     );
 
     const cleanupCanvasFiles = useCallback(
-        (extra?: unknown) => {
-            cleanupAssetImages({ extra, history: historyRef.current, lastHistory: lastHistoryRef.current });
+        (candidates: unknown, extra?: unknown) => {
+            cleanupAssetImages(candidates, { extra, history: historyRef.current, lastHistory: lastHistoryRef.current });
         },
         [cleanupAssetImages],
     );
@@ -573,7 +573,7 @@ function InfiniteCanvasPage() {
             setConnections((prev) => [...prev, { id: nanoid(), ...connection }]);
             setSelectedNodeIds(new Set([newNode.id]));
             setSelectedConnectionId(null);
-            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group) setDialogNodeId(newNode.id);
+            if (type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio) setDialogNodeId(newNode.id);
             setPendingConnectionCreate(null);
             setConnecting(null);
         },
@@ -826,7 +826,10 @@ function InfiniteCanvasPage() {
             setPreviewNodeId((current) => (current && allIds.has(current) ? null : current));
             setRunningNodeId((current) => (current && allIds.has(current) ? null : current));
             setContextMenu((current) => (current?.type === "node" && allIds.has(current.nodeId) ? null : current));
-            cleanupCanvasFiles({ projectId, nodes: nodesRef.current.filter((node) => !allIds.has(node.id)), chatSessions });
+            cleanupCanvasFiles(
+                { nodes: nodesRef.current.filter((node) => allIds.has(node.id)) },
+                { projectId, nodes: nodesRef.current.filter((node) => !allIds.has(node.id)), chatSessions },
+            );
         },
         [chatSessions, cleanupCanvasFiles, projectId],
     );
@@ -860,8 +863,8 @@ function InfiniteCanvasPage() {
         setRunningNodeId(null);
         deselectCanvas();
         setClearConfirmOpen(false);
-        cleanupCanvasFiles({ projectId, nodes: [], chatSessions: [] });
-    }, [cleanupCanvasFiles, deselectCanvas, projectId]);
+        cleanupCanvasFiles({ nodes: nodesRef.current, chatSessions }, { projectId, nodes: [], chatSessions: [] });
+    }, [chatSessions, cleanupCanvasFiles, deselectCanvas, projectId]);
 
     const duplicateNode = useCallback((nodeId: string) => {
         const source = nodesRef.current.find((node) => node.id === nodeId);
@@ -1024,10 +1027,11 @@ function InfiniteCanvasPage() {
     }, [createProject, navigate]);
 
     const deleteCurrentProject = useCallback(() => {
+        const deletedProject = currentProject;
         deleteProjects([projectId]);
-        cleanupAssetImages();
+        cleanupAssetImages(deletedProject);
         navigate("/canvas");
-    }, [cleanupAssetImages, deleteProjects, navigate, projectId]);
+    }, [cleanupAssetImages, currentProject, deleteProjects, navigate, projectId]);
 
     const handleCanvasMouseDown = useCallback(
         (event: ReactPointerEvent<HTMLDivElement>) => {

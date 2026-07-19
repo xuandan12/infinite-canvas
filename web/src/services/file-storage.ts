@@ -49,18 +49,15 @@ export async function deleteStoredMedia(keys: Iterable<string>) {
     );
 }
 
-export async function cleanupUnusedMedia(usedData: unknown) {
+export async function cleanupUnusedMedia(candidateData: unknown, usedData: unknown) {
+    const candidateKeys = collectMediaStorageKeys(candidateData);
     const usedKeys = collectMediaStorageKeys(usedData);
-    const unused: string[] = [];
-    await store.iterate((_value, key) => {
-        if (!usedKeys.has(key)) unused.push(key);
-    });
-    await Promise.all(unused.map((key) => store.removeItem(key)));
+    await deleteStoredMedia([...candidateKeys].filter((key) => !usedKeys.has(key)));
 }
 
 export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()) {
     if (!value || typeof value !== "object") return keys;
-    if ("storageKey" in value && typeof value.storageKey === "string" && value.storageKey.includes(":")) keys.add(value.storageKey);
+    if ("storageKey" in value && typeof value.storageKey === "string" && /^(video|audio|file|video-reference|audio-reference):/.test(value.storageKey)) keys.add(value.storageKey);
     Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectMediaStorageKeys(child, keys)) : collectMediaStorageKeys(item, keys)));
     return keys;
 }
