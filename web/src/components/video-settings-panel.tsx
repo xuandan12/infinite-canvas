@@ -21,7 +21,6 @@ import {
     normalizeSeedanceRatio,
     normalizeSeedanceResolution,
     seedanceDurationOptions,
-    seedancePixelLabel,
     seedanceRatioOptions,
     seedanceResolutionOptions,
 } from "@/lib/seedance-video";
@@ -164,8 +163,8 @@ function GrokVideoSettingsPanel({ config, onConfigChange, theme, showTitle, clas
                                 onClick={() => onConfigChange("size", item.value)}
                             >
                                 <SizePreview width={ratioPreview(item.value).width} height={ratioPreview(item.value).height} color={theme.node.text} />
-                                <span>{item.label}</span>
-                                <span className="text-[10px] leading-none opacity-55">{item.value}</span>
+                                <span className="font-medium leading-none">{item.label}</span>
+                                <span className="text-[10px] leading-none opacity-55">{item.description}</span>
                             </button>
                         ))}
                     </div>
@@ -234,8 +233,8 @@ function SeedanceVideoSettingsPanel({ config, onConfigChange, theme, showTitle, 
                                 onClick={() => onConfigChange("size", item.value)}
                             >
                                 <SizePreview width={ratioPreview(item.value).width} height={ratioPreview(item.value).height} color={theme.node.text} />
-                                <span>{item.label}</span>
-                                <span className="text-[10px] leading-none opacity-55">{item.value === "adaptive" ? "adaptive" : seedancePixelLabel(resolution, item.value)}</span>
+                                <span className="font-medium leading-none">{item.label}</span>
+                                <span className="text-[10px] leading-none opacity-55">{item.description}</span>
                             </button>
                         ))}
                     </div>

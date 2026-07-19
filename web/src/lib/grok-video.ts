@@ -12,13 +12,13 @@ export const grokVideoResolutionOptions = [
 ] as const;
 
 export const grokVideoRatioOptions = [
-    { value: "16:9", label: "横屏" },
-    { value: "9:16", label: "竖屏" },
-    { value: "1:1", label: "方形" },
-    { value: "4:3", label: "标准横屏" },
-    { value: "3:4", label: "标准竖屏" },
-    { value: "3:2", label: "摄影横屏" },
-    { value: "2:3", label: "摄影竖屏" },
+    { value: "16:9", label: "16:9", description: "横屏" },
+    { value: "9:16", label: "9:16", description: "竖屏" },
+    { value: "1:1", label: "1:1", description: "方形" },
+    { value: "4:3", label: "4:3", description: "标准横屏" },
+    { value: "3:4", label: "3:4", description: "标准竖屏" },
+    { value: "3:2", label: "3:2", description: "摄影横屏" },
+    { value: "2:3", label: "2:3", description: "摄影竖屏" },
 ] as const;
 
 export const grokVideoDurationOptions = [1, 5, 6, 8, 10, 12, 15] as const;

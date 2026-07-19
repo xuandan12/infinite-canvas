@@ -31,13 +31,13 @@ export const seedanceResolutionOptions = [
 ] as const;
 
 export const seedanceRatioOptions = [
-    { value: "16:9", label: "横屏" },
-    { value: "9:16", label: "竖屏" },
-    { value: "1:1", label: "方形" },
-    { value: "4:3", label: "标准横屏" },
-    { value: "3:4", label: "标准竖屏" },
-    { value: "21:9", label: "宽银幕" },
-    { value: "adaptive", label: "自适应" },
+    { value: "16:9", label: "16:9", description: "横屏" },
+    { value: "9:16", label: "9:16", description: "竖屏" },
+    { value: "1:1", label: "1:1", description: "方形" },
+    { value: "4:3", label: "4:3", description: "标准横屏" },
+    { value: "3:4", label: "3:4", description: "标准竖屏" },
+    { value: "21:9", label: "21:9", description: "宽银幕" },
+    { value: "adaptive", label: "自适应", description: "自动匹配" },
 ] as const;
 
 export const seedanceDurationOptions = [-1, 4, 5, 6, 8, 10, 12, 15] as const;
