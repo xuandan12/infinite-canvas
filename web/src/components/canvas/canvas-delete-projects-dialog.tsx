@@ -11,8 +11,9 @@ export function CanvasDeleteProjectsDialog() {
     const deleteProjects = useCanvasStore((state) => state.deleteProjects);
     const cleanupImages = useAssetStore((state) => state.cleanupImages);
     const confirm = () => {
+        const deletedProjects = useCanvasStore.getState().projects.filter((project) => ids.includes(project.id));
         deleteProjects(ids);
-        cleanupImages();
+        cleanupImages(deletedProjects);
         removeSelectedIds(ids);
         setDeleteIds([]);
     };
